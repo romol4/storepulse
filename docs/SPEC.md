@@ -72,6 +72,7 @@ storepulse/
   core/
     sources/apple_sales.py  apple_analytics.py  play_reports.py  play_vitals.py  revenuecat.py
     discovery.py      list apps from each credential
+    config.py         non-secret settings (config.toml) and local paths
     db.py             schema, migrations, upserts
     secrets.py        SecretStore interface: KeyringStore, EncryptedFileStore, DbEncryptedStore
     digest.py         builds the email (HTML + plain text)
@@ -102,7 +103,10 @@ Four sources, each behind its own module in `core/sources/`. Each is optional: a
 
 - Create an API key in App Store Connect (Users and Access → Integrations) with the Sales and Reports role, plus App Manager or Admin if the analytics report requests must be created by the collector. Store the `.p8`, key ID, issuer ID, and vendor number.
 - Sign a JWT per run: header `alg: ES256`, `kid: <key id>`; payload `iss: <issuer id>`, `aud: appstoreconnect-v1`, `exp` ≤ 20 minutes out.
-- **Sales:** `GET /v1/salesReports` with `filter[frequency]=DAILY`, `filter[reportType]=SALES`, `filter[reportSubType]=SUMMARY`, `filter[vendorNumber]`, `filter[reportDate]=YYYY-MM-DD`. Response is a gzipped TSV. Map rows to apps by Apple Identifier; split by Product Type Identifier into first-time downloads, redownloads, updates, and in-app purchases. A 404 for a date means "not available yet", not an error.
+- **Sales:** `GET /v1/salesReports` with `filter[frequency]=DAILY`, `filter[reportType]=SALES`, `filter[reportSubType]=SUMMARY`, `filter[vendorNumber]`, `filter[reportDate]=YYYY-MM-DD`. Response is a gzipped TSV. Map app rows to apps by Apple Identifier and in-app purchase rows by Parent Identifier (the parent app's SKU, kept in `kv` as `apple_sku:<sku>`); split by Product Type Identifier into first-time downloads (`installs`), redownloads, and in-app purchases (`iap_units`). Update rows are dropped (no metric in the vocabulary). Unrecognized product types are logged and counted; their proceeds still count. Apps seen in app rows but not in discovery are added automatically; IAP rows never add apps.
+  - **404s:** a 404 whose detail says there were no sales is stored as a zero-sales day (clears that day's rows). "Not available yet" is `not_ready`. Any other 404 is `not_ready` for dates up to 2 days old and inferred no-sales for older dates; an inferred no-sales day never deletes stored rows (it logs a warning instead).
+  - **Retention:** Apple keeps daily reports for about a year, so backfills are clamped to the last 365 days (Pacific time); earlier dates are skipped with a warning and never recorded.
+  - **Auth:** the JWT is re-signed after 15 minutes so long backfills never run on an expired token.
 - **Subscriptions:** same endpoint with `reportType=SUBSCRIPTION` / `SUBSCRIPTION_EVENT` for apps with subscriptions.
 - **Analytics:** one-time setup per app: `POST /v1/analyticsReportRequests` with `accessType: ONGOING`. Daily: list the request's reports, pick the needed ones (downloads, discovery and engagement), fetch `DAILY` instances, download segment files (gzipped CSV). Store the request IDs in the DB so setup never repeats.
 
@@ -164,7 +168,7 @@ CREATE TABLE ingest_log (
   rows INTEGER, error TEXT
 );
 
-CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, schema version
+CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, Apple SKU map, schema version
 ```
 
 **Metric vocabulary** (fixed list in `db.py`; unknown metrics are rejected):
