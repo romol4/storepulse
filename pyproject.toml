@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "storepulse"
+version = "0.1.0.dev0"
+description = "Pull your App Store Connect and Google Play stats into SQLite and get a daily digest."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Storepulse contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+# Compatible ranges for installers (pipx); exact pins live in requirements-dev.lock.
+dependencies = [
+    "cryptography>=44,<51",
+    "httpx>=0.28,<0.29",
+    "keyring>=25.7,<26",
+    "platformdirs>=4.3,<5",
+    "PyJWT>=2.10,<3",
+    "tzdata>=2025.1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=2.3,<3",
+    "pytest>=9.1,<10",
+    "ruff>=0.16,<0.17",
+]
+
+[project.scripts]
+storepulse = "storepulse.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/romol4/storepulse"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/storepulse"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["storepulse", "conftest"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "S311"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+mypy_path = "src"
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

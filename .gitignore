@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Storepulse: never commit credentials or real data
+*.p8
+*service-account*.json
+*-sa.json
+storepulse.db
+storepulse.db-*
+secrets.enc
+config.toml
