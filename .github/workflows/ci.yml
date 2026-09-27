@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash  # also on Windows, so multi-line steps stop at the first failure
+
 jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}

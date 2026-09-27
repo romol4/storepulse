@@ -56,6 +56,14 @@ def _err(env: Env) -> str:
     return env.stderr.getvalue()  # type: ignore[attr-defined, no-any-return]
 
 
+def _scalar(sql: str, *params: object) -> int:
+    conn = db.connect(config.db_path())
+    try:
+        return int(conn.execute(sql, params).fetchone()[0])
+    finally:
+        conn.close()
+
+
 def _nothing_saved(memory_keyring: MemoryKeyring) -> bool:
     return not memory_keyring.store and not (config.config_dir() / "config.toml").exists()
 
@@ -73,8 +81,7 @@ def test_happy_path(memory_keyring: MemoryKeyring, p8_file: Path, p8_pem: str) -
     assert cfg.secret_store == "keyring"
     assert cfg.apple == config.AppleConfig("ISSUER-1", "KEYID12345", "85000000")
     assert "PRIVATE KEY" not in (config.config_dir() / "config.toml").read_text()
-    conn = db.connect(config.db_path())
-    assert conn.execute("SELECT COUNT(*) FROM apps").fetchone()[0] == 2
+    assert _scalar("SELECT COUNT(*) FROM apps") == 2
     assert fake.sales_dates() == [CHECK_DAY]
 
 
@@ -157,8 +164,7 @@ def test_init_then_backfill(memory_keyring: MemoryKeyring, p8_file: Path) -> Non
     fake = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
     env = _env(fake, _answers(p8_file, "y", "5"))
     assert main(["init"], env) == 0
-    conn = db.connect(config.db_path())
-    assert conn.execute("SELECT COUNT(*) FROM daily_metrics").fetchone()[0] == 5 * 11
+    assert _scalar("SELECT COUNT(*) FROM daily_metrics") == 5 * 11
     assert "Done: 5 days loaded" in _out(env)
 
 
@@ -176,11 +182,8 @@ def test_backfill_clamps_old_from(memory_keyring: MemoryKeyring, p8_file: Path) 
     requested = fake.sales_dates()
     assert min(requested) == cutoff and len(requested) == 365
     assert "about a year" in _err(env) and "2025-01-01" in _err(env)
-    conn = db.connect(config.db_path())
-    old = conn.execute(
-        "SELECT COUNT(*) FROM ingest_log WHERE report_date < ?", (cutoff,)
-    ).fetchone()[0]
-    assert old == 0
+    assert _scalar("SELECT COUNT(*) FROM ingest_log WHERE report_date < ?", cutoff) == 0
+    assert _scalar("SELECT COUNT(*) FROM ingest_log") == 365
 
 
 def test_backfill_days(memory_keyring: MemoryKeyring, p8_file: Path) -> None:

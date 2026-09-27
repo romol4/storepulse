@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
@@ -64,6 +65,15 @@ def memory_keyring() -> Iterator[MemoryKeyring]:
     keyring.set_keyring(backend)
     yield backend
     keyring.set_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
+def reset_logging() -> Iterator[None]:
+    """`main()` configures the storepulse logger; don't let that leak between tests."""
+    logger = logging.getLogger("storepulse")
+    saved = (list(logger.handlers), logger.level, logger.propagate)
+    yield
+    logger.handlers[:], logger.level, logger.propagate = saved
 
 
 @pytest.fixture(autouse=True)
