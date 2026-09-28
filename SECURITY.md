@@ -21,7 +21,8 @@ receives fixes.
 ## What Storepulse promises about secrets
 
 - **Where secrets are kept:**
-  - The OS keychain, when one is available.
+  - The OS keychain, when one is available. Secrets too large for a keychain entry
+    are AES-GCM encrypted into a file under a random key held in the keychain.
   - Otherwise a local file encrypted with AES-GCM, with a key derived from your
     passphrase using scrypt. Each entry is bound to its name.
 - **Where secrets never go:**

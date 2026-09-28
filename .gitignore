@@ -224,4 +224,5 @@ __marimo__/
 storepulse.db
 storepulse.db-*
 secrets.enc
+keychain-wrapped.json
 config.toml
