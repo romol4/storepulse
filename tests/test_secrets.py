@@ -120,6 +120,35 @@ def test_passphrase_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert EncryptedFileStore(path, "from-env-pass").get("a") == "value1234"
 
 
+def test_passphrase_from_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    passphrase_file = tmp_path / "passphrase"
+    passphrase_file.write_text("from-file-pass\n")
+    monkeypatch.setenv("STOREPULSE_PASSPHRASE_FILE", str(passphrase_file))
+    path = tmp_path / "secrets.enc"
+    EncryptedFileStore(path, "from-file-pass").set("a", "value1234")
+    # No direct source at all: only the file. Trailing newline is stripped.
+    assert EncryptedFileStore(path).get("a") == "value1234"
+
+
+def test_direct_passphrase_wins_over_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    passphrase_file = tmp_path / "passphrase"
+    passphrase_file.write_text("wrong-pass")
+    monkeypatch.setenv("STOREPULSE_PASSPHRASE_FILE", str(passphrase_file))
+    monkeypatch.setenv("STOREPULSE_PASSPHRASE", "from-env-pass")
+    path = tmp_path / "secrets.enc"
+    EncryptedFileStore(path, "from-env-pass").set("a", "value1234")
+    # STOREPULSE_PASSPHRASE is set too, so the (wrong) file is never consulted.
+    assert EncryptedFileStore(path).get("a") == "value1234"
+
+
+def test_missing_passphrase_file_is_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "secrets.enc"
+    EncryptedFileStore(path, "x").set("a", "value1234")
+    monkeypatch.setenv("STOREPULSE_PASSPHRASE_FILE", str(tmp_path / "missing"))
+    with pytest.raises(SecretStoreError, match="STOREPULSE_PASSPHRASE_FILE"):
+        EncryptedFileStore(path).get("a")
+
+
 def test_missing_passphrase_explains(tmp_path: Path) -> None:
     with pytest.raises(SecretStoreError, match="STOREPULSE_PASSPHRASE"):
         EncryptedFileStore(tmp_path / "secrets.enc").set("a", "value1234")

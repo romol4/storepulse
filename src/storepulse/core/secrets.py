@@ -26,6 +26,9 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 KEYRING_SERVICE = "storepulse"
 PASSPHRASE_ENV = "STOREPULSE_PASSPHRASE"  # noqa: S105 (env var name)
+# For scheduled runs, which can't prompt: a path to a 0600 file holding the passphrase.
+# Only this module reads it (cli/schedule.py just writes the file and sets the env var).
+PASSPHRASE_FILE_ENV = "STOREPULSE_PASSPHRASE_FILE"  # noqa: S105 (env var name)
 SECRETS_FILENAME = "secrets.enc"
 
 FILE_FORMAT = "storepulse-secrets"
@@ -311,20 +314,34 @@ class EncryptedFileStore:
         }
 
     def _passphrase(self) -> str:
-        # The env var wins so unattended runs never prompt; callers pass only their
-        # interactive prompt and never read the variable themselves.
+        # Direct value first, then the file (for scheduled runs, which can't prompt),
+        # then the interactive callback; callers pass only their interactive prompt and
+        # never read either variable themselves.
         source = self._passphrase_source
         value = os.environ.get(PASSPHRASE_ENV, "")
+        if not value:
+            value = self._read_passphrase_file()
         if not value and callable(source):
             value = source()
         elif not value and isinstance(source, str):
             value = source
         if not value:
             raise SecretStoreError(
-                f"a passphrase is required to unlock {self.path}; set {PASSPHRASE_ENV} "
-                "or run interactively (see README, 'Where secrets live')"
+                f"a passphrase is required to unlock {self.path}; set {PASSPHRASE_ENV} or "
+                f"{PASSPHRASE_FILE_ENV}, or run interactively (see README, 'Where secrets live')"
             )
         return value
+
+    def _read_passphrase_file(self) -> str:
+        file_path = os.environ.get(PASSPHRASE_FILE_ENV, "")
+        if not file_path:
+            return ""
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SecretStoreError(
+                f"could not read {PASSPHRASE_FILE_ENV} at {file_path!r}: {type(exc).__name__}"
+            ) from None
 
     def _derive(self, kdf: dict[str, Any]) -> bytes:
         if self._key is None:

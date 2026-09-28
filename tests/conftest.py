@@ -81,6 +81,7 @@ def isolated_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("STOREPULSE_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("STOREPULSE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.delenv("STOREPULSE_PASSPHRASE", raising=False)
+    monkeypatch.delenv("STOREPULSE_PASSPHRASE_FILE", raising=False)
     return tmp_path
 
 

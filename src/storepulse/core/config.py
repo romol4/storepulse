@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,6 +13,17 @@ import platformdirs
 APP_NAME = "storepulse"
 CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "storepulse.db"
+
+SECURITY_STARTTLS = "starttls"
+SECURITY_SSL = "ssl"
+EMAIL_SECURITY_MODES = (SECURITY_STARTTLS, SECURITY_SSL)
+
+# docs/SPEC.md, Outputs: Google Play's own bad-behavior thresholds.
+DEFAULT_CRASH_THRESHOLD = 0.0109
+DEFAULT_ANR_THRESHOLD = 0.0047
+DEFAULT_STALE_DAYS = 4
+DEFAULT_RUN_TIME = "10:30"
+DEFAULT_SCHEDULE_DAYS = 7
 
 # Overrides for tests and unusual setups; they point at directories, never at secrets.
 CONFIG_DIR_ENV = "STOREPULSE_CONFIG_DIR"
@@ -52,10 +64,42 @@ class GoogleConfig:
 
 
 @dataclass
+class EmailConfig:
+    host: str
+    port: int
+    security: str  # "starttls" or "ssl"
+    username: str
+    from_addr: str
+    to_addrs: list[str]
+
+
+@dataclass
+class DigestConfig:
+    crash_threshold: float = DEFAULT_CRASH_THRESHOLD
+    anr_threshold: float = DEFAULT_ANR_THRESHOLD
+    # Only the daily-cadence overdue rule (apple_sales, play_vitals) is configurable this
+    # way; the monthly and earnings cadence day-counts are fixed (docs/SPEC.md, Scheduling
+    # and reliability), since they follow Play's publishing mechanics, not a preference.
+    stale_days: int = DEFAULT_STALE_DAYS
+    # Optional fixed rates for a converted total; no outbound calls, no daily reference rate.
+    rates: dict[str, float] = field(default_factory=dict)
+    display_currency: str = ""
+
+
+@dataclass
+class ScheduleConfig:
+    run_time: str = DEFAULT_RUN_TIME
+    days: int = DEFAULT_SCHEDULE_DAYS
+
+
+@dataclass
 class Config:
     secret_store: str = ""
     apple: AppleConfig | None = None
     google: GoogleConfig | None = None
+    email: EmailConfig | None = None
+    digest: DigestConfig = field(default_factory=DigestConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -91,6 +135,45 @@ def load(path: Path | None = None) -> Config:
             )
         except KeyError as exc:
             raise ConfigError(f"{path}: [google] is missing {exc.args[0]!r}") from None
+    email = raw.pop("email", None)
+    if isinstance(email, dict):
+        try:
+            to_addrs = email["to_addrs"]
+            if not isinstance(to_addrs, list):
+                raise ConfigError(f"{path}: [email] to_addrs must be a list")
+            cfg.email = EmailConfig(
+                host=str(email["host"]),
+                port=int(email["port"]),
+                security=str(email["security"]),
+                username=str(email["username"]),
+                from_addr=str(email["from_addr"]),
+                to_addrs=[str(a) for a in to_addrs],
+            )
+        except KeyError as exc:
+            raise ConfigError(f"{path}: [email] is missing {exc.args[0]!r}") from None
+        if cfg.email.security not in EMAIL_SECURITY_MODES:
+            raise ConfigError(
+                f"{path}: [email] security must be one of {EMAIL_SECURITY_MODES}, "
+                f"got {cfg.email.security!r}"
+            )
+    digest = raw.pop("digest", None)
+    if isinstance(digest, dict):
+        rates = digest.get("rates", {})
+        if not isinstance(rates, dict):
+            raise ConfigError(f"{path}: [digest] rates must be a table of currency = rate")
+        cfg.digest = DigestConfig(
+            crash_threshold=float(digest.get("crash_threshold", DEFAULT_CRASH_THRESHOLD)),
+            anr_threshold=float(digest.get("anr_threshold", DEFAULT_ANR_THRESHOLD)),
+            stale_days=int(digest.get("stale_days", DEFAULT_STALE_DAYS)),
+            rates={str(k): float(v) for k, v in rates.items()},
+            display_currency=str(digest.get("display_currency", "")),
+        )
+    schedule = raw.pop("schedule", None)
+    if isinstance(schedule, dict):
+        cfg.schedule = ScheduleConfig(
+            run_time=str(schedule.get("run_time", DEFAULT_RUN_TIME)),
+            days=int(schedule.get("days", DEFAULT_SCHEDULE_DAYS)),
+        )
     cfg.extra = raw
     return cfg
 
@@ -99,6 +182,14 @@ def _toml_str(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{escaped}"'
+
+
+def _toml_list(values: Iterable[str]) -> str:
+    return "[" + ", ".join(_toml_str(v) for v in values) + "]"
+
+
+def _toml_float(value: float) -> str:
+    return repr(float(value))
 
 
 def dumps(cfg: Config) -> str:
@@ -120,6 +211,38 @@ def dumps(cfg: Config) -> str:
             f"bucket_uri = {_toml_str(cfg.google.bucket_uri)}",
             f"service_account_email = {_toml_str(cfg.google.service_account_email)}",
         ]
+    if cfg.email is not None:
+        lines += [
+            "",
+            "[email]",
+            f"host = {_toml_str(cfg.email.host)}",
+            f"port = {cfg.email.port}",
+            f"security = {_toml_str(cfg.email.security)}",
+            f"username = {_toml_str(cfg.email.username)}",
+            f"from_addr = {_toml_str(cfg.email.from_addr)}",
+            f"to_addrs = {_toml_list(cfg.email.to_addrs)}",
+        ]
+    lines += [
+        "",
+        "[digest]",
+        f"crash_threshold = {_toml_float(cfg.digest.crash_threshold)}",
+        f"anr_threshold = {_toml_float(cfg.digest.anr_threshold)}",
+        f"stale_days = {cfg.digest.stale_days}",
+    ]
+    if cfg.digest.display_currency:
+        lines.append(f"display_currency = {_toml_str(cfg.digest.display_currency)}")
+    if cfg.digest.rates:
+        lines += ["", "[digest.rates]"]
+        lines += [
+            f"{_toml_str(currency)} = {_toml_float(rate)}"
+            for currency, rate in sorted(cfg.digest.rates.items())
+        ]
+    lines += [
+        "",
+        "[schedule]",
+        f"run_time = {_toml_str(cfg.schedule.run_time)}",
+        f"days = {cfg.schedule.days}",
+    ]
     return "\n".join(lines) + "\n"
 
 
