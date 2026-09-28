@@ -9,6 +9,7 @@ from typing import Literal
 from storepulse.core import db
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient
 from storepulse.core.sources.apple_sales import sku_key
+from storepulse.core.sources.google_client import GoogleClient
 
 DiscoveryStatus = Literal["ok", "permission_denied"]
 
@@ -75,4 +76,25 @@ def register_apple_apps(
         if app["sku"]:
             db.set_kv(conn, sku_key(app["sku"]), app["id"])
         registered.append((app["id"], name))
+    return registered
+
+
+def discover_play(client: GoogleClient, conn: sqlite3.Connection) -> DiscoveryResult:
+    """Register every Play app the service account can see (Reporting API apps:search).
+
+    Auth errors propagate: the caller explains a pending-permission 403.
+    """
+    return DiscoveryResult("ok", apps=register_play_apps(conn, client.search_apps()))
+
+
+def register_play_apps(
+    conn: sqlite3.Connection, apps: list[dict[str, str]]
+) -> list[tuple[str, str]]:
+    registered: list[tuple[str, str]] = []
+    for app in apps:
+        if not app["package"]:
+            continue
+        name = app["name"] or app["package"]
+        db.upsert_app(conn, "android", app["package"], name)
+        registered.append((app["package"], name))
     return registered
