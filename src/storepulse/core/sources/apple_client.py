@@ -61,10 +61,15 @@ class AppleVendorError(AppleError):
 AGREEMENT_CODE = "FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED"
 
 
+def _as_sentence(text: str) -> str:
+    """End ``text`` with one full stop, so the hint appended after it reads correctly."""
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
 def forbidden_error(purpose: str, errors: list[AppleErrorDetail]) -> AppleAuthError:
     """Map a 403 to the right fix, keeping Apple's own reason in the message."""
     detail = redact(" ".join(e.detail or e.title for e in errors).strip())
-    said = f" Apple said: {detail}" if detail else ""
+    said = f" Apple said: {_as_sentence(detail)}" if detail else ""
     if any(e.code == AGREEMENT_CODE for e in errors):
         return AppleAgreementError(
             f"App Store Connect denied {purpose} (HTTP 403) because a required agreement is "
