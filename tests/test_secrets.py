@@ -200,3 +200,73 @@ def test_logging_filter(caplog: pytest.LogCaptureFixture) -> None:
         assert "[REDACTED]" in caplog.text
     finally:
         logger.removeFilter(handler_filter)
+
+
+# -- keychain wrapping key for large secrets ---------------------------------------------
+
+BIG = '{"type": "service_account", "private_key": "' + "k" * 2000 + '"}'
+
+
+def test_large_secret_is_wrapped(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    store = KeyringStore(config_dir=tmp_path)
+    store.set("google_sa", BIG)
+    assert memory_keyring.store[("storepulse", "google_sa")] == secrets.WRAPPED_MARKER
+    assert ("storepulse", secrets.WRAPPING_KEY_NAME) in memory_keyring.store
+    wrapped = (tmp_path / secrets.WRAPPED_FILENAME).read_text()
+    assert "kkkk" not in wrapped
+    assert KeyringStore(config_dir=tmp_path).get("google_sa") == BIG
+    # Every keychain value stays well under Windows Credential Manager's limit.
+    assert all(len(v) <= secrets.KEYCHAIN_DIRECT_LIMIT for v in memory_keyring.store.values())
+
+
+def test_small_secret_stays_direct(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    KeyringStore(config_dir=tmp_path).set("apple_p8", PEM)
+    assert memory_keyring.store[("storepulse", "apple_p8")] == PEM
+    assert not (tmp_path / secrets.WRAPPED_FILENAME).exists()
+
+
+def test_missing_wrapping_key_is_clear(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    store = KeyringStore(config_dir=tmp_path)
+    store.set("google_sa", BIG)
+    del memory_keyring.store[("storepulse", secrets.WRAPPING_KEY_NAME)]
+    with pytest.raises(SecretStoreError, match="wrapping key is missing"):
+        store.get("google_sa")
+
+
+def test_wrapped_entry_moved_fails(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    store = KeyringStore(config_dir=tmp_path)
+    store.set("google_sa", BIG)
+    store.set("other_big", BIG + "x")
+    path = tmp_path / secrets.WRAPPED_FILENAME
+    data = json.loads(path.read_text())
+    e = data["entries"]
+    e["google_sa"], e["other_big"] = e["other_big"], e["google_sa"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(SecretStoreError, match="tampered"):
+        store.get("google_sa")
+
+
+def test_delete_cleans_both_places(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    store = KeyringStore(config_dir=tmp_path)
+    store.set("google_sa", BIG)
+    store.delete("google_sa")
+    assert ("storepulse", "google_sa") not in memory_keyring.store
+    data = json.loads((tmp_path / secrets.WRAPPED_FILENAME).read_text())
+    assert data["entries"] == {}
+    assert store.get("google_sa") is None
+
+
+def test_shrinking_secret_drops_wrapped_copy(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    store = KeyringStore(config_dir=tmp_path)
+    store.set("google_sa", BIG)
+    store.set("google_sa", "small-now-12345")
+    data = json.loads((tmp_path / secrets.WRAPPED_FILENAME).read_text())
+    assert data["entries"] == {} and store.get("google_sa") == "small-now-12345"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_wrapped_file_mode_0600(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:
+    KeyringStore(config_dir=tmp_path).set("google_sa", BIG)
+    assert stat.S_IMODE((tmp_path / secrets.WRAPPED_FILENAME).stat().st_mode) == 0o600
+    # Written atomically: no temp files left behind.
+    assert [p.name for p in tmp_path.iterdir()] == [secrets.WRAPPED_FILENAME]
