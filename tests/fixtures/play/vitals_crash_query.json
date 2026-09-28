@@ -1,0 +1,91 @@
+{
+ "rows": [
+  {
+   "aggregationPeriod": "DAILY",
+   "startTime": {
+    "year": 2026,
+    "month": 9,
+    "day": 20,
+    "timeZone": {
+     "id": "America/Los_Angeles"
+    }
+   },
+   "metrics": [
+    {
+     "metric": "userPerceivedCrashRate",
+     "decimalValue": {
+      "value": "0.0142"
+     }
+    },
+    {
+     "metric": "userPerceivedCrashRate28dUserWeighted",
+     "decimalValue": {
+      "value": "0.0081"
+     }
+    },
+    {
+     "metric": "distinctUsers",
+     "decimalValue": {
+      "value": "5120"
+     }
+    }
+   ]
+  },
+  {
+   "aggregationPeriod": "DAILY",
+   "startTime": {
+    "year": 2026,
+    "month": 9,
+    "day": 21,
+    "timeZone": {
+     "id": "America/Los_Angeles"
+    }
+   },
+   "metrics": [
+    {
+     "metric": "userPerceivedCrashRate",
+     "decimalValue": {
+      "value": "0.0035"
+     }
+    },
+    {
+     "metric": "userPerceivedCrashRate28dUserWeighted",
+     "decimalValue": {
+      "value": "0.0079"
+     }
+    },
+    {
+     "metric": "distinctUsers",
+     "decimalValue": {
+      "value": "4987"
+     }
+    }
+   ]
+  },
+  {
+   "aggregationPeriod": "DAILY",
+   "startTime": {
+    "year": 2026,
+    "month": 9,
+    "day": 22,
+    "timeZone": {
+     "id": "America/Los_Angeles"
+    }
+   },
+   "metrics": [
+    {
+     "metric": "userPerceivedCrashRate28dUserWeighted",
+     "decimalValue": {
+      "value": "0.0078"
+     }
+    },
+    {
+     "metric": "distinctUsers",
+     "decimalValue": {
+      "value": "5011"
+     }
+    }
+   ]
+  }
+ ]
+}
