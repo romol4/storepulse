@@ -50,8 +50,36 @@ class AppleAuthError(AppleError):
     """401/403: the key, its IDs, or its role is wrong. Not retried."""
 
 
+class AppleAgreementError(AppleAuthError):
+    """403 because the Account Holder hasn't accepted an updated agreement."""
+
+
 class AppleVendorError(AppleError):
     """The vendor number was rejected."""
+
+
+AGREEMENT_CODE = "FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED"
+
+
+def forbidden_error(purpose: str, errors: list[AppleErrorDetail]) -> AppleAuthError:
+    """Map a 403 to the right fix, keeping Apple's own reason in the message."""
+    detail = redact(" ".join(e.detail or e.title for e in errors).strip())
+    said = f" Apple said: {detail}" if detail else ""
+    if any(e.code == AGREEMENT_CODE for e in errors):
+        return AppleAgreementError(
+            f"App Store Connect denied {purpose} (HTTP 403) because a required agreement is "
+            "missing or has expired. The Account Holder must sign in to App Store Connect "
+            "and accept the pending agreement (Business, or the banner on the home page); "
+            f"the API key itself is fine.{said} {DOCS_HINT}",
+            403,
+            errors,
+        )
+    return AppleAuthError(
+        f"App Store Connect denied {purpose} (HTTP 403). Check that the API key has the Sales "
+        f"and Reports role (Users and Access > Integrations > edit the key).{said} {DOCS_HINT}",
+        403,
+        errors,
+    )
 
 
 def load_private_key(p8_pem: str) -> ec.EllipticCurvePrivateKey:
@@ -185,13 +213,7 @@ class AppleClient:
                     errors,
                 )
             if status == 403:
-                raise AppleAuthError(
-                    f"App Store Connect denied {purpose} (HTTP 403). The API key needs the "
-                    "Sales and Reports role (Users and Access > Integrations > edit the key). "
-                    f"{DOCS_HINT}",
-                    status,
-                    errors,
-                )
+                raise forbidden_error(purpose, errors)
             if (status == 429 or status >= 500) and attempt < MAX_ATTEMPTS:
                 self._backoff(attempt, f"HTTP {status}")
                 continue

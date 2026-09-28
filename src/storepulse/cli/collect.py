@@ -143,8 +143,19 @@ def backfill_apple(
             f"unrecognized product types (only proceeds counted): {codes}. "
             "Please report them so they can be mapped."
         )
+    if summary.remapped:
+        env.say(
+            f"Re-mapped in-app purchases for {len(summary.remapped)} day(s) once their "
+            "parent app appeared in later reports."
+        )
     if summary.unmapped_rows:
         env.warn(f"{summary.unmapped_rows} report rows matched no known app and were skipped.")
+    if summary.unmapped_child_rows:
+        env.warn(
+            f"{summary.unmapped_child_rows} in-app purchase rows belong to an app Storepulse "
+            "hasn't seen yet. Re-run this backfill after the app has a download in the "
+            "range (or once the key can list apps) to pick them up."
+        )
     for day, message in summary.errors:
         env.warn(f"{day}: {message}")
     return 1 if summary.errors else 0

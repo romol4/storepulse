@@ -9,6 +9,7 @@ from typing import Literal
 from storepulse.core import discovery
 from storepulse.core.sources import apple_sales, play_installs, play_vitals
 from storepulse.core.sources.apple_client import (
+    AppleAgreementError,
     AppleAuthError,
     AppleClient,
     AppleError,
@@ -46,7 +47,9 @@ def check_apple(client: AppleClient, vendor_number: str, today: date) -> CheckRe
         result.apps = discovery.list_apple_apps(client)
         result.checks.append(Check("ok", f"Apple key accepted; {len(result.apps)} app(s) visible."))
     except AppleAuthError as exc:
-        if exc.status != 403:
+        # A plain 403 may just mean the role can't list apps; an agreement 403 blocks
+        # everything, so it fails here with Apple's reason.
+        if exc.status != 403 or isinstance(exc, AppleAgreementError):
             result.checks.append(Check("fail", str(exc)))
             return result
         result.checks.append(
@@ -68,15 +71,8 @@ def check_apple(client: AppleClient, vendor_number: str, today: date) -> CheckRe
         result.checks.append(Check("fail", str(exc)))
         return result
     except AppleAuthError as exc:
-        if exc.status == 403:
-            text = (
-                "the key was accepted but can't download sales reports (HTTP 403): it lacks "
-                "the Sales and Reports role. Edit the key in App Store Connect > Users and "
-                "Access > Integrations. See README, 'Apple API key'."
-            )
-        else:
-            text = str(exc)
-        result.checks.append(Check("fail", text))
+        # The exception already names the fix (role or agreement) and Apple's reason.
+        result.checks.append(Check("fail", str(exc)))
         return result
     except AppleError as exc:
         result.checks.append(Check("fail", str(exc)))

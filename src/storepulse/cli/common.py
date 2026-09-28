@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import getpass
-import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,7 +14,6 @@ import httpx
 
 from storepulse.core import config
 from storepulse.core.secrets import (
-    PASSPHRASE_ENV,
     SECRETS_FILENAME,
     SecretStore,
     default_store,
@@ -80,17 +78,16 @@ def ask_positive_int(env: Env, prompt: str, default: int) -> int:
 
 
 def existing_passphrase(env: Env) -> Callable[[], str]:
+    """Interactive prompt only; the store itself prefers STOREPULSE_PASSPHRASE."""
+
     def prompt() -> str:
-        return os.environ.get(PASSPHRASE_ENV) or env.getpass("Secrets file passphrase: ")
+        return env.getpass("Secrets file passphrase: ")
 
     return prompt
 
 
 def new_passphrase(env: Env, path: Path) -> Callable[[], str]:
     def prompt() -> str:
-        from_env = os.environ.get(PASSPHRASE_ENV)
-        if from_env:
-            return from_env
         if path.exists():
             return env.getpass("Secrets file passphrase: ")
         env.say("No OS keychain is available, so secrets go in an encrypted file.")
