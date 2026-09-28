@@ -21,7 +21,8 @@ receives fixes.
 ## What Storepulse promises about secrets
 
 - **Where secrets are kept:**
-  - The OS keychain, when one is available.
+  - The OS keychain, when one is available. Secrets too large for a keychain entry
+    are AES-GCM encrypted into a file under a random key held in the keychain.
   - Otherwise a local file encrypted with AES-GCM, with a key derived from your
     passphrase using scrypt. Each entry is bound to its name.
 - **Where secrets never go:**
@@ -33,4 +34,9 @@ receives fixes.
   - Your own SMTP server.
   - No telemetry, no version checks.
 - **What API keys it asks for:**
-  - Setup guides request read-only roles only (Sales and Reports on Apple).
+  - Setup guides request read-only roles only: Sales and Reports on Apple, and
+    *View app information and download bulk reports* on Google Play.
+  - Android revenue optionally needs Play's *View financial data, orders, and
+    cancellation survey responses*, which also exposes order details and buyers'
+    city, state and postcode. Storepulse keeps only the buyer's country, and works
+    without that permission (no Android revenue).

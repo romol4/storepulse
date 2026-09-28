@@ -12,8 +12,20 @@ from datetime import date, timedelta
 
 from storepulse.core import db
 from storepulse.core.secrets import redact
-from storepulse.core.sources import apple_sales
+from storepulse.core.sources import (
+    apple_sales,
+    play_earnings,
+    play_installs,
+    play_sales,
+    play_vitals,
+)
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient, AppleVendorError
+from storepulse.core.sources.google_client import (
+    BULK_PERMISSION,
+    FINANCIAL_PERMISSION,
+    GoogleClient,
+)
+from storepulse.core.sources.play_common import Month, decode_csv, plan_month, read_zip_csv
 
 log = logging.getLogger(__name__)
 
@@ -216,3 +228,393 @@ def _remap_pending(
         )
         if progress:
             progress(day, f"re-mapped in-app purchases, {written} rows")
+
+
+# -- Google Play ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlaySummary:
+    """Outcome of one Play source pass. Periods are months (files) or days (vitals)."""
+
+    source: str
+    ok: int = 0
+    rows: int = 0
+    not_ready: list[str] = field(default_factory=list)
+    no_file: list[str] = field(default_factory=list)
+    skipped: int = 0
+    already_final: list[str] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # Nothing could be collected at all, e.g. a prefix that lists no files (usually a
+    # missing permission). Not an ingest status, so reported here instead of the log.
+    warnings: list[str] = field(default_factory=list)
+
+
+def _error(
+    conn: sqlite3.Connection,
+    summary: PlaySummary,
+    label: str,
+    report_date: str,
+    started: str,
+    exc: Exception,
+) -> None:
+    message = redact(f"{type(exc).__name__}: {exc}")
+    log.error("%s %s failed: %s", summary.source, label, message)
+    summary.errors.append((label, message))
+    db.log_ingest(
+        conn,
+        source=summary.source,
+        report_date=report_date,
+        started_at=started,
+        status="error",
+        note=f"{label}: {message}",
+    )
+
+
+def _month_status(
+    conn: sqlite3.Connection,
+    summary: PlaySummary,
+    label: str,
+    month: Month,
+    plan: str,
+    progress: Callable[[str, str], None] | None,
+) -> bool:
+    """Handle every plan except "collect". Returns True if the month needs collecting."""
+    if plan == "collect":
+        return True
+    started = db.utc_now()
+    iso = month.first_day.isoformat()
+    if plan == "skip":
+        summary.skipped += 1
+        return False
+    if plan == "not_ready":
+        summary.not_ready.append(label)
+        db.log_ingest(
+            conn, source=summary.source, report_date=iso, started_at=started, status="not_ready"
+        )
+        outcome = "not ready yet"
+    else:
+        summary.no_file.append(label)
+        db.log_ingest(
+            conn,
+            source=summary.source,
+            report_date=iso,
+            started_at=started,
+            status="ok",
+            rows=0,
+            note=f"{label}: no file",
+        )
+        outcome = "no file"
+    if progress:
+        progress(label, outcome)
+    return False
+
+
+def collect_play_installs(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    bucket: str,
+    months: list[Month],
+    *,
+    today: date,
+    progress: Callable[[str, str], None] | None = None,
+) -> PlaySummary:
+    """Installs per app and month; the overview (ALL) and country files are combined
+    into one replacement so neither erases the other."""
+    summary = PlaySummary(play_installs.SOURCE)
+    client.check_token()
+    for package, app_id in sorted(db.apps_for(conn, "android").items()):
+        try:
+            names = [
+                o.name for o in client.list_objects(bucket, play_installs.object_prefix(package))
+            ]
+        except Exception as exc:
+            _error(conn, summary, package, months[-1].first_day.isoformat(), db.utc_now(), exc)
+            continue
+        files = play_installs.month_files(names, package)
+        if not files:
+            summary.warnings.append(
+                f"no installs files visible for {package} under "
+                f"gs://{bucket}/{play_installs.object_prefix(package)}. New apps take a day or "
+                f"two to appear; otherwise check that the service account has "
+                f"'{BULK_PERMISSION}' for this app."
+            )
+            continue
+        for month in months:
+            label = f"{package} {month}"
+            plan = plan_month(month, set(files), today)
+            if not _month_status(conn, summary, label, month, plan, progress):
+                continue
+            started = db.utc_now()
+            try:
+                parsed: dict[str, list[play_installs.InstallsRow]] = {}
+                for kind, name in files[month].items():
+                    text = decode_csv(client.download(bucket, name))
+                    parsed[kind] = play_installs.parse_installs(
+                        text, by_country=kind == "country", what=name
+                    )
+                rows = play_installs.to_metric_rows(
+                    app_id, parsed.get("overview", []), parsed.get("country", [])
+                )
+                written = db.replace_source_range(
+                    conn,
+                    summary.source,
+                    month.first_day.isoformat(),
+                    month.last_day.isoformat(),
+                    rows,
+                    app_ids=[app_id],
+                )
+            except Exception as exc:
+                _error(conn, summary, label, month.first_day.isoformat(), started, exc)
+                if progress:
+                    progress(label, "error")
+                continue
+            summary.ok += 1
+            summary.rows += written
+            db.log_ingest(
+                conn,
+                source=summary.source,
+                report_date=month.first_day.isoformat(),
+                started_at=started,
+                status="ok",
+                rows=written,
+                note=package,
+            )
+            if progress:
+                progress(label, f"ok, {written} rows")
+    return summary
+
+
+def _collect_account_months(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    bucket: str,
+    months: list[Month],
+    *,
+    source: str,
+    prefix: str,
+    month_files: Callable[[list[str]], dict[Month, list[str]]],
+    load: Callable[[Month, list[str], dict[str, int]], tuple[int, str | None]],
+    today: date,
+    published_after_month_end: bool,
+    progress: Callable[[str, str], None] | None,
+    skip_if_final: bool,
+) -> PlaySummary:
+    """Account-wide monthly files (sales, earnings). The first month is the earliest file
+    under the prefix, since these files cover every app in the account."""
+    summary = PlaySummary(source)
+    client.check_token()
+    started = db.utc_now()
+    try:
+        files = month_files([o.name for o in client.list_objects(bucket, prefix)])
+        if not files:
+            # Listing can't tell "no reports yet" from "not allowed to see them", so the
+            # warning names both causes: no Android revenue, or the missing permission.
+            summary.warnings.append(
+                f"no {source} files are visible under gs://{bucket}/{prefix}. If the account "
+                "has no Android revenue yet, ignore this. Otherwise grant the service account "
+                f"the optional '{FINANCIAL_PERMISSION}' permission (global) in Play Console > "
+                "Users and permissions (see README, 'Google service account')."
+            )
+            return summary
+    except Exception as exc:
+        _error(conn, summary, prefix, months[-1].first_day.isoformat(), started, exc)
+        return summary
+    packages = db.apps_for(conn, "android")
+    for month in months:
+        label = str(month)
+        if skip_if_final and db.get_kv(conn, play_earnings.done_key(month)):
+            summary.already_final.append(label)
+            if progress:
+                progress(label, "final earnings already loaded")
+            continue
+        plan = plan_month(
+            month, set(files), today, published_after_month_end=published_after_month_end
+        )
+        if not _month_status(conn, summary, label, month, plan, progress):
+            continue
+        started = db.utc_now()
+        try:
+            written, note = load(month, files[month], packages)
+        except Exception as exc:
+            _error(conn, summary, label, month.first_day.isoformat(), started, exc)
+            if progress:
+                progress(label, "error")
+            continue
+        if note:
+            summary.notes.append(f"{label}: {note}")
+            log.warning("%s %s: %s", source, label, note)
+        summary.ok += 1
+        summary.rows += written
+        db.log_ingest(
+            conn,
+            source=source,
+            report_date=month.first_day.isoformat(),
+            started_at=started,
+            status="ok",
+            rows=written,
+            note=note,
+        )
+        if progress:
+            progress(label, f"ok, {written} rows")
+    return summary
+
+
+def collect_play_sales(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    bucket: str,
+    months: list[Month],
+    *,
+    today: date,
+    progress: Callable[[str, str], None] | None = None,
+) -> PlaySummary:
+    """Provisional proceeds from the daily-updated sales report. Months whose final
+    earnings are loaded are skipped."""
+
+    def load(month: Month, names: list[str], packages: dict[str, int]) -> tuple[int, str | None]:
+        texts = play_sales.read_texts([client.download(bucket, n) for n in names], str(month))
+        mapped = play_sales.map_month(month, texts, packages, f"sales report {month}")
+        written = db.replace_source_range(
+            conn,
+            play_sales.SOURCE,
+            month.first_day.isoformat(),
+            month.last_day.isoformat(),
+            mapped.rows,
+        )
+        return written, mapped.note()
+
+    return _collect_account_months(
+        conn,
+        client,
+        bucket,
+        months,
+        source=play_sales.SOURCE,
+        prefix=play_sales.PREFIX,
+        month_files=play_sales.month_files,
+        load=load,
+        today=today,
+        published_after_month_end=False,
+        progress=progress,
+        skip_if_final=True,
+    )
+
+
+def collect_play_earnings(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    bucket: str,
+    months: list[Month],
+    *,
+    today: date,
+    progress: Callable[[str, str], None] | None = None,
+) -> PlaySummary:
+    """Final net proceeds. Replaces the month's provisional play_sales rows atomically."""
+
+    def load(month: Month, names: list[str], packages: dict[str, int]) -> tuple[int, str | None]:
+        texts = [read_zip_csv(client.download(bucket, n), n) for n in sorted(names)]
+        mapped = play_earnings.map_month(month, texts, packages, f"earnings {month}")
+        written = db.replace_source_range(
+            conn,
+            play_earnings.SOURCE,
+            month.first_day.isoformat(),
+            month.last_day.isoformat(),
+            mapped.rows,
+            clear_sources=(play_sales.SOURCE,),
+            kv={play_earnings.done_key(month): db.utc_now()},
+        )
+        return written, mapped.note()
+
+    return _collect_account_months(
+        conn,
+        client,
+        bucket,
+        months,
+        source=play_earnings.SOURCE,
+        prefix=play_earnings.PREFIX,
+        month_files=play_earnings.month_files,
+        load=load,
+        today=today,
+        published_after_month_end=True,
+        progress=progress,
+        skip_if_final=False,
+    )
+
+
+def collect_play_vitals(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    dates: list[date],
+    *,
+    progress: Callable[[str, str], None] | None = None,
+) -> PlaySummary:
+    """Daily and 28-day vitals per app. Days past the metric sets' freshness are
+    not_ready."""
+    summary = PlaySummary(play_vitals.SOURCE)
+    client.check_token()
+    if not dates:
+        return summary
+    for package, app_id in sorted(db.apps_for(conn, "android").items()):
+        started = db.utc_now()
+        try:
+            latest_dates = [
+                client.latest_daily_date(package, metric_set)
+                for metric_set in play_vitals.METRIC_SETS
+            ]
+            latest = None if None in latest_dates else min(d for d in latest_dates if d)
+            ready = [d for d in dates if latest is not None and d <= latest]
+            results = (
+                {
+                    metric_set: client.query_metric_set(
+                        package, metric_set, list(mapping), ready[0], ready[-1]
+                    )
+                    for metric_set, mapping in play_vitals.METRIC_SETS.items()
+                }
+                if ready
+                else {}
+            )
+            wanted = {d.isoformat() for d in ready}
+            rows = [r for r in play_vitals.to_metric_rows(app_id, results) if r.date in wanted]
+            if ready:
+                db.replace_source_range(
+                    conn,
+                    summary.source,
+                    ready[0].isoformat(),
+                    ready[-1].isoformat(),
+                    rows,
+                    app_ids=[app_id],
+                )
+        except Exception as exc:
+            _error(conn, summary, package, dates[-1].isoformat(), started, exc)
+            if progress:
+                progress(package, "error")
+            continue
+        per_day = Counter(r.date for r in rows)
+        for day in dates:
+            iso = day.isoformat()
+            if day in ready:
+                summary.ok += 1
+                summary.rows += per_day[iso]
+                db.log_ingest(
+                    conn,
+                    source=summary.source,
+                    report_date=iso,
+                    started_at=started,
+                    status="ok",
+                    rows=per_day[iso],
+                    note=package,
+                )
+            else:
+                summary.not_ready.append(f"{package} {iso}")
+                db.log_ingest(
+                    conn,
+                    source=summary.source,
+                    report_date=iso,
+                    started_at=started,
+                    status="not_ready",
+                    note=package,
+                )
+        if progress:
+            progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready")
+    return summary

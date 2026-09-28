@@ -33,8 +33,10 @@ Storepulse (working name) is an open-source tool any developer can run to pull t
 
 The tool holds keys that can read a developer's sales data, so credential handling is the core design constraint.
 
-- **Least privilege.** Setup guides request only read roles: Sales and Reports on Apple, *View app information and download bulk reports* on Play. The docs say plainly what each key can and cannot do.
+- **Least privilege.** Setup guides request only read roles: Sales and Reports on Apple, *View app information and download bulk reports* on Play. Android revenue additionally needs Play's *View financial data, orders, and cancellation survey responses* (global). It is **optional**: it also exposes order details and buyers' city, state and postcode (Storepulse keeps only the country), so without it Storepulse still collects installs and vitals and `doctor` warns that Android revenue is off. The docs say plainly what each key and permission can and cannot do.
 - **Local mode:** secrets go in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) via the `keyring` library. On headless machines without a keychain, they go in an encrypted file unlocked by a passphrase or an env var.
+  - Secrets over 1 KB, such as a service-account JSON, exceed Windows Credential Manager's size limit.
+  - These are AES-GCM encrypted into `keychain-wrapped.json` under a random key kept in the keychain, and the keychain entry holds only a marker.
 - **Hosted mode:** secrets are uploaded once through the setup page, encrypted at rest with AES-GCM under a master key supplied only by environment variable or Docker secret, and never displayed again (the UI shows a fingerprint, the upload date, and a Test connection button).
 - **Everywhere:** secrets are redacted from logs and error messages; raw report caches contain no credentials; the database without the master key reveals no keys.
 - **Why not a shared SaaS:** a service holding thousands of developers' store keys is a high-value target and a liability. Self-hosting keeps each user's keys on infrastructure they control.
@@ -70,7 +72,8 @@ flowchart TD
 ```
 storepulse/
   core/
-    sources/apple_sales.py  apple_analytics.py  play_reports.py  play_vitals.py  revenuecat.py
+    sources/apple_client.py  apple_sales.py  apple_analytics.py  google_auth.py  google_client.py
+            play_common.py  play_installs.py  play_sales.py  play_earnings.py  play_vitals.py  revenuecat.py
     discovery.py      list apps from each credential
     config.py         non-secret settings (config.toml) and local paths
     db.py             schema, migrations, upserts
@@ -119,12 +122,27 @@ Four sources, each behind its own module in `core/sources/`. Each is optional: a
   - `earnings/earnings_<YYYYMM>_*.zip`: transaction-level earnings in payout currency.
   - `sales/salesreport_<YYYYMM>.zip`: orders, if earnings lag too far.
 - Gotcha: the installs CSVs are UTF-16 encoded. The current month's file is rewritten daily, so always re-parse it whole.
+- **Installs:**
+  - `installs` = Daily User Installs, `uninstalls` = Daily User Uninstalls, `active_devices` = Active Device Installs. These match Play Console's user acquisitions and user losses, not device acquisitions.
+  - The overview file gives the `ALL` rows and the country file gives per-country rows. Both are written in one replacement per app and month.
+  - An empty cell is missing data, not zero.
+- **Proceeds:**
+  - `play_sales` writes `sales_gross`: provisional gross sales from the daily-updated sales report. Item price excluding tax, in the buyer's currency, before Google's fee. `Refund` rows subtract the absolute item price. Never stored as `proceeds`, which is net for every source.
+  - `play_earnings` writes `proceeds`: final net proceeds from the monthly earnings report. Merchant currency, including fee and tax lines. Rows dated outside the file's month are moved to the month's nearest edge (never dropped), so the month still reconciles with the payout. Rows with no known package are skipped, and their amount per currency is recorded in the ingest note.
+  - Loading a month's earnings deletes that month's `play_sales` rows in the same transaction, and later sales re-pulls skip the month.
+  - Both need the optional financial permission. When an account-wide prefix (`sales/`, `earnings/`) lists no files at all, collection warns and names that permission instead of silently skipping.
+- **Discovery:** every Play collection re-runs app discovery (`apps:search`, falling back to the packages in the bucket's installs file names), so apps launched after setup are collected. `doctor` registers the apps it sees.
+- **Missing months:**
+  - Months before the first file are skipped, with nothing logged. For installs the first file is per app; sales and earnings files cover the whole account, so their first file is account-wide.
+  - A missing current month is `not_ready`, as is last month's earnings before the 15th. Any other missing past month is logged `ok` with 0 rows and a "no file" note.
 
 ### Google: Play Developer Reporting API (vitals)
 
 - Scope `https://www.googleapis.com/auth/playdeveloperreporting`, same service account.
 - Query `crashRateMetricSet` and `anrRateMetricSet` per package with a DAILY timeline; keep user-perceived crash and ANR rates plus distinct users.
-- Check each metric set's freshness before requesting the latest days.
+  - Also keep the 28-day user-weighted rates (`userPerceivedCrashRate28dUserWeighted`, `userPerceivedAnrRate28dUserWeighted`). Google's bad-behavior thresholds apply to these, and alerts must use them. Daily rates for small apps swing too much.
+- Check each metric set's freshness before requesting the latest days. DAILY `latestEndTime` is exclusive, and later days are `not_ready`.
+- **Auth:** the service account JSON is exchanged for an OAuth token directly: an RS256 JWT assertion to `token_uri`. A 403 after a successful token exchange means Play Console hasn't granted the permission yet, which can take 24–48 hours for a new account.
 
 ### RevenueCat (optional)
 
@@ -173,24 +191,28 @@ CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, A
 
 **Metric vocabulary** (fixed list in `db.py`; unknown metrics are rejected):
 
-| Metric | Unit | Sources |
-| --- | --- | --- |
-| `installs` | count | apple\_sales (first-time), play\_installs |
-| `redownloads` | count | apple\_sales |
-| `uninstalls` | count | play\_installs |
-| `active_devices` | count | play\_installs |
-| `proceeds` | money | apple\_sales, play\_earnings |
-| `iap_units` | count | apple\_sales |
-| `impressions`, `page_views` | count | apple\_analytics |
-| `crash_rate`, `anr_rate` | ratio 0–1 | play\_vitals |
+| Metric | Unit | Sources | Over several days |
+| --- | --- | --- | --- |
+| `installs` | count | apple\_sales (first-time), play\_installs | sum |
+| `redownloads` | count | apple\_sales | sum |
+| `uninstalls` | count | play\_installs | sum |
+| `active_devices` | count (snapshot) | play\_installs | last value |
+| `proceeds` | money, net | apple\_sales, play\_earnings | sum (per currency) |
+| `sales_gross` | money, gross, provisional | play\_sales | sum (per currency) |
+| `iap_units` | count | apple\_sales | sum |
+| `impressions`, `page_views` | count | apple\_analytics | sum |
+| `crash_rate`, `anr_rate` | ratio 0–1, daily | play\_vitals | mean weighted by `vitals_users` |
+| `crash_rate_28d`, `anr_rate_28d` | ratio 0–1, 28-day user-weighted | play\_vitals | last value (already a 28-day window) |
+| `vitals_users` | count (distinct users in the crash-rate metric set; a snapshot, not additive) | play\_vitals | last value |
 
 **Rules**
 
 - Every write is `INSERT … ON CONFLICT DO UPDATE`, so re-pulls overwrite and never duplicate.
 - A re-pull for one source and date replaces that source's rows for that date inside one transaction (delete, then insert) so countries that dropped to zero don't linger.
 - Money is stored in the original currency; conversion happens at render time (see Open decisions).
-- `country = 'ALL'` rows are written only where the source gives a total; otherwise the renderer sums countries. `apple_sales` writes no `ALL` rows, so readers sum its countries. Unknown countries are `ZZ`, never `ALL`.
-- A row belongs to the source that wrote it. Another source writing the same key fails loudly and changes nothing; it never takes the row over.
+- `country = 'ALL'` rows are written only where the source gives a total; otherwise the renderer sums countries. Per source: `play_installs` writes both, and readers use its `ALL` row and never add the countries to it; `apple_sales` writes no `ALL` rows, so readers sum its countries. Unknown countries are `ZZ`, never `ALL`.
+- Month-based sources replace a whole month per app, or per account for sales and earnings, in one transaction.
+- A row belongs to the source that wrote it. Another source writing the same key fails loudly and changes nothing; it never takes the row over. Provisional `play_sales` rows are the one planned hand-over: `play_earnings` deletes them explicitly in the same transaction.
 
 **Hosted-mode additions**
 
@@ -236,7 +258,10 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 - A new Google service account can take up to a day or two before Play permissions take effect; `doctor` detects this and says so instead of reporting a generic 403.
 - Raw downloaded files are cached for 30 days so parsers can be fixed and re-run without re-downloading.
 - A lock prevents overlapping runs.
-- Any `error`, or a date still `not_ready` after 4 days, is flagged in the digest.
+- Any `error`, or a report that is overdue, is flagged in the digest. Overdue depends on the source's cadence:
+  - daily sources (`apple_sales`, `play_vitals`): still `not_ready` 4 days after `report_date`;
+  - `play_installs` and `play_sales` (monthly files rewritten daily, logged with the month's first day): still `not_ready` 4 days into the month;
+  - `play_earnings` (published once, early in the following month): still `not_ready` after the 15th of the month following `report_date`.
 
 ## Outputs
 

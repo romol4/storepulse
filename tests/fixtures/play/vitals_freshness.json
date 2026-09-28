@@ -1,0 +1,30 @@
+{
+ "name": "apps/com.example.billft/crashRateMetricSet",
+ "freshnessInfo": {
+  "freshnesses": [
+   {
+    "aggregationPeriod": "HOURLY",
+    "latestEndTime": {
+     "year": 2026,
+     "month": 9,
+     "day": 25,
+     "hours": 10,
+     "timeZone": {
+      "id": "America/Los_Angeles"
+     }
+    }
+   },
+   {
+    "aggregationPeriod": "DAILY",
+    "latestEndTime": {
+     "year": 2026,
+     "month": 9,
+     "day": 23,
+     "timeZone": {
+      "id": "America/Los_Angeles"
+     }
+    }
+   }
+  ]
+ }
+}

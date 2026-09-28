@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,11 +19,15 @@ METRICS: frozenset[str] = frozenset(
         "uninstalls",
         "active_devices",
         "proceeds",
+        "sales_gross",
         "iap_units",
         "impressions",
         "page_views",
         "crash_rate",
         "anr_rate",
+        "crash_rate_28d",
+        "anr_rate_28d",
+        "vitals_users",
     }
 )
 
@@ -218,6 +222,69 @@ def _insert_owned(conn: sqlite3.Connection, source: str, batch: list[MetricRow],
                 f"but that row belongs to {owner['source']}; nothing was written"
             )
     raise SourceCollisionError(f"{source}: fewer rows were written than expected")
+
+
+def replace_source_range(
+    conn: sqlite3.Connection,
+    source: str,
+    start: str,
+    end: str,
+    rows: Iterable[MetricRow],
+    *,
+    app_ids: Collection[int] | None = None,
+    clear_sources: Collection[str] = (),
+    kv: dict[str, str] | None = None,
+) -> int:
+    """Replace a source's rows for ``start``..``end`` (inclusive) in one transaction.
+
+    ``app_ids`` limits the delete to those apps (for per-app files). ``clear_sources``
+    also deletes other sources' rows in the range, e.g. provisional ``play_sales`` rows
+    once the final ``play_earnings`` report arrives. ``kv`` entries are set in the same
+    transaction. Returns rows written.
+    """
+    batch = list(rows)
+    for row in batch:
+        _validate(row)
+        if not start <= row.date <= end:
+            raise ValueError(f"row date {row.date} is outside {start}..{end}")
+        if app_ids is not None and row.app_id not in app_ids:
+            raise ValueError(f"row for app {row.app_id} is outside the replaced apps")
+    sources = [source, *clear_sources]
+    where = f"source IN ({', '.join('?' for _ in sources)}) AND date BETWEEN ? AND ?"
+    params: list[object] = [*sources, start, end]
+    if app_ids is not None:
+        ids = list(app_ids)
+        where += f" AND app_id IN ({', '.join('?' for _ in ids)})" if ids else " AND 0"
+        params += ids
+    now = utc_now()
+    with transaction(conn):
+        conn.execute(f"DELETE FROM daily_metrics WHERE {where}", params)  # noqa: S608
+        _insert_owned(conn, source, batch, now)
+        for key, value in (kv or {}).items():
+            set_kv(conn, key, value)
+    return len(batch)
+
+
+def count_rows(
+    conn: sqlite3.Connection,
+    source: str,
+    start: str,
+    end: str,
+    app_ids: Collection[int] | None = None,
+) -> int:
+    sql = "SELECT COUNT(*) AS n FROM daily_metrics WHERE source = ? AND date BETWEEN ? AND ?"
+    params: list[object] = [source, start, end]
+    if app_ids is not None:
+        ids = list(app_ids) or [-1]
+        sql += f" AND app_id IN ({', '.join('?' for _ in ids)})"
+        params += ids
+    return int(conn.execute(sql, params).fetchone()["n"])
+
+
+def apps_for(conn: sqlite3.Connection, platform: str) -> dict[str, int]:
+    """store_id → app id for one platform."""
+    rows = conn.execute("SELECT id, store_id FROM apps WHERE platform = ?", (platform,))
+    return {str(r["store_id"]): int(r["id"]) for r in rows}
 
 
 def log_ingest(

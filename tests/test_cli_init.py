@@ -45,7 +45,8 @@ def _env(fake: FakeApple, answers: list[str], secrets: list[str] | None = None) 
 
 
 def _answers(p8_file: Path, *extra: str) -> list[str]:
-    return ["ISSUER-1", "KEYID12345", "85000000", str(p8_file), *extra]
+    """Answers for: set up Apple? yes (four prompts), set up Google? no, then ``extra``."""
+    return ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", *extra]
 
 
 def _out(env: Env) -> str:
@@ -123,7 +124,7 @@ def test_unexplained_404_passes_with_warning(memory_keyring: MemoryKeyring, p8_f
     fake = FakeApple(apps=FT_APPS, sales={CHECK_DAY: apple_error(404, "Not found")})
     env = _env(fake, _answers(p8_file, "n"))
     assert main(["init"], env) == 0
-    assert "couldn't fully confirm the vendor number; the first backfill will tell" in _err(env)
+    assert "couldn't fully confirm the vendor number; the first backfill will tell" in _out(env)
     assert config.load().apple is not None
 
 

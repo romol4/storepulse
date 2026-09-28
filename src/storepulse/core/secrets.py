@@ -51,9 +51,7 @@ class SecretStore(Protocol):
 
     def get(self, name: str) -> str | None: ...
 
-    # Implementations must not assume a size limit: Phase 2 stores service-account JSON,
-    # which exceeds Windows Credential Manager's ~2.5 KB cap and will need chunking or
-    # a keychain-held wrapping key.
+    # Implementations must not assume a size limit (a service-account JSON is ~2.3 KB).
     def set(self, name: str, value: str) -> None: ...
 
     def delete(self, name: str) -> None: ...
@@ -63,15 +61,79 @@ class SecretStore(Protocol):
     def fingerprint(self, name: str) -> str | None: ...
 
 
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.b64decode(text.encode("ascii"), validate=True)
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON via a temp file and ``os.replace``; 0600 on POSIX."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".secrets-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+        if os.name == "posix":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _seal(key: bytes, aad_prefix: bytes, name: str, value: str) -> dict[str, str]:
+    """AES-GCM encrypt one entry, binding its name as associated data."""
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(key).encrypt(nonce, value.encode("utf-8"), aad_prefix + name.encode())
+    return {"nonce": _b64(nonce), "ciphertext": _b64(ciphertext)}
+
+
+def _unseal(key: bytes, aad_prefix: bytes, name: str, entry: Any, where: Path) -> str:
+    try:
+        nonce = _unb64(entry["nonce"])
+        ciphertext = _unb64(entry["ciphertext"])
+        plain = AESGCM(key).decrypt(nonce, ciphertext, aad_prefix + name.encode())
+    except InvalidTag:
+        raise SecretStoreError(
+            f"could not decrypt {name!r} in {where}: wrong passphrase or tampered file"
+        ) from None
+    except (KeyError, TypeError, ValueError):
+        raise SecretStoreError(f"entry {name!r} in {where} is corrupt") from None
+    value = plain.decode("utf-8")
+    register_secret(value)
+    return value
+
+
+WRAPPED_FILENAME = "keychain-wrapped.json"
+WRAPPED_FORMAT = "storepulse-keychain-wrapped"
+WRAPPED_MARKER = "wrapped:v1"
+WRAPPING_KEY_NAME = "__wrapping_key__"
+_WRAPPED_AAD_PREFIX = b"storepulse-keychain-wrapped/v1/"
+# Windows Credential Manager caps a secret at ~2.5 KB and keyring's encoding roughly
+# doubles it, so anything over this goes into the wrapped file instead.
+KEYCHAIN_DIRECT_LIMIT = 1024
+
+
 class KeyringStore:
-    """Secrets in the OS keychain via ``keyring``."""
+    """Secrets in the OS keychain via ``keyring``.
+
+    Small secrets (like the Apple .p8) are stored directly. Larger ones (like a Google
+    service-account JSON) are AES-GCM encrypted into ``keychain-wrapped.json`` under a
+    random key that itself lives in the keychain; the keychain entry then holds only a
+    marker. Without the keychain the file is useless.
+    """
 
     kind = STORE_KEYRING
 
-    def __init__(self, service: str = KEYRING_SERVICE) -> None:
+    def __init__(self, service: str = KEYRING_SERVICE, config_dir: Path | None = None) -> None:
         self.service = service
+        self.config_dir = config_dir
 
-    def get(self, name: str) -> str | None:
+    def _raw_get(self, name: str) -> str | None:
         try:
             return keyring.get_password(self.service, name)
         except keyring.errors.KeyringError as exc:
@@ -79,18 +141,104 @@ class KeyringStore:
                 f"could not read {name!r} from the OS keychain ({type(exc).__name__})"
             ) from None
 
-    def set(self, name: str, value: str) -> None:
+    def _raw_set(self, name: str, value: str) -> None:
         try:
             keyring.set_password(self.service, name, value)
         except keyring.errors.KeyringError as exc:
             raise SecretStoreError(
                 f"could not save {name!r} to the OS keychain ({type(exc).__name__})"
             ) from None
-        register_secret(value)
 
-    def delete(self, name: str) -> None:
+    def _raw_delete(self, name: str) -> None:
         with contextlib.suppress(keyring.errors.PasswordDeleteError):
             keyring.delete_password(self.service, name)
+
+    # -- wrapped storage for large secrets ---------------------------------------------
+
+    @property
+    def wrapped_path(self) -> Path:
+        if self.config_dir is None:
+            raise SecretStoreError("this keychain store has no config directory for large secrets")
+        return self.config_dir / WRAPPED_FILENAME
+
+    def _wrapping_key(self, create: bool) -> bytes:
+        stored = self._raw_get(WRAPPING_KEY_NAME)
+        if stored is not None:
+            try:
+                key = _unb64(stored)
+            except ValueError:
+                key = b""
+            if len(key) != 32:
+                raise SecretStoreError(
+                    "the keychain wrapping key is corrupt; re-run `storepulse init`"
+                )
+            return key
+        if not create:
+            raise SecretStoreError(
+                "the keychain wrapping key is missing, so large secrets can't be decrypted; "
+                "re-run `storepulse init` (see README, 'Where secrets live')"
+            )
+        key = os.urandom(32)
+        self._raw_set(WRAPPING_KEY_NAME, _b64(key))
+        return key
+
+    def _load_wrapped(self) -> dict[str, Any]:
+        path = self.wrapped_path
+        if not path.exists():
+            return {"format": WRAPPED_FORMAT, "version": 1, "entries": {}}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise SecretStoreError(f"{path} is unreadable or corrupt") from None
+        if (
+            not isinstance(data, dict)
+            or data.get("format") != WRAPPED_FORMAT
+            or data.get("version") != 1
+            or not isinstance(data.get("entries"), dict)
+        ):
+            raise SecretStoreError(f"{path} is not a supported Storepulse wrapped-secrets file")
+        return data
+
+    # -- SecretStore -------------------------------------------------------------------
+
+    def get(self, name: str) -> str | None:
+        value = self._raw_get(name)
+        if value != WRAPPED_MARKER:
+            return value
+        data = self._load_wrapped()
+        entry = data["entries"].get(name)
+        if entry is None:
+            raise SecretStoreError(
+                f"{name!r} is missing from {self.wrapped_path}; re-run `storepulse init`"
+            )
+        key = self._wrapping_key(create=False)
+        return _unseal(key, _WRAPPED_AAD_PREFIX, name, entry, self.wrapped_path)
+
+    def set(self, name: str, value: str) -> None:
+        if name == WRAPPING_KEY_NAME:
+            raise SecretStoreError(f"{name!r} is reserved")
+        if len(value) <= KEYCHAIN_DIRECT_LIMIT:
+            self._raw_set(name, value)
+            self._drop_wrapped(name)
+        else:
+            key = self._wrapping_key(create=True)
+            data = self._load_wrapped()
+            data["entries"][name] = _seal(key, _WRAPPED_AAD_PREFIX, name, value)
+            _atomic_write_json(self.wrapped_path, data)
+            self._raw_set(name, WRAPPED_MARKER)
+        register_secret(value)
+
+    def _drop_wrapped(self, name: str) -> None:
+        if self.config_dir is None or not self.wrapped_path.exists():
+            return
+        data = self._load_wrapped()
+        if name in data["entries"]:
+            del data["entries"][name]
+            _atomic_write_json(self.wrapped_path, data)
+
+    def delete(self, name: str) -> None:
+        self._drop_wrapped(name)
+        self._raw_delete(name)
 
     def describe(self) -> str:
         backend = keyring.get_keyring()
@@ -100,14 +248,6 @@ class KeyringStore:
     def fingerprint(self, name: str) -> str | None:
         value = self.get(name)
         return None if value is None else fingerprint(value)
-
-
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
-
-
-def _unb64(text: str) -> bytes:
-    return base64.b64decode(text.encode("ascii"), validate=True)
 
 
 class EncryptedFileStore:
@@ -160,18 +300,7 @@ class EncryptedFileStore:
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".secrets-", dir=self.path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=1, sort_keys=True)
-            if os.name == "posix":
-                os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        _atomic_write_json(self.path, data)
 
     def _new_file(self) -> dict[str, Any]:
         return {
@@ -209,25 +338,8 @@ class EncryptedFileStore:
             )
         return self._key
 
-    @staticmethod
-    def _aad(name: str) -> bytes:
-        return _AAD_PREFIX + name.encode("utf-8")
-
     def _decrypt(self, data: dict[str, Any], name: str, entry: Any) -> str:
-        key = self._derive(data["kdf"])
-        try:
-            nonce = _unb64(entry["nonce"])
-            ciphertext = _unb64(entry["ciphertext"])
-            plain = AESGCM(key).decrypt(nonce, ciphertext, self._aad(name))
-        except InvalidTag:
-            raise SecretStoreError(
-                f"could not decrypt {name!r} in {self.path}: wrong passphrase or tampered file"
-            ) from None
-        except (KeyError, TypeError, ValueError):
-            raise SecretStoreError(f"entry {name!r} in {self.path} is corrupt") from None
-        value = plain.decode("utf-8")
-        register_secret(value)
-        return value
+        return _unseal(self._derive(data["kdf"]), _AAD_PREFIX, name, entry, self.path)
 
     # -- SecretStore -----------------------------------------------------------------
 
@@ -245,9 +357,7 @@ class EncryptedFileStore:
         first = next(iter(data["entries"].items()), None)
         if first is not None:
             self._decrypt(data, *first)
-        nonce = os.urandom(12)
-        ciphertext = AESGCM(key).encrypt(nonce, value.encode("utf-8"), self._aad(name))
-        data["entries"][name] = {"nonce": _b64(nonce), "ciphertext": _b64(ciphertext)}
+        data["entries"][name] = _seal(key, _AAD_PREFIX, name, value)
         self._write(data)
         register_secret(value)
 
@@ -287,7 +397,7 @@ def default_store(
     re-detect and fall back to a different store.
     """
     if keyring_available():
-        return KeyringStore()
+        return KeyringStore(config_dir=config_dir)
     return EncryptedFileStore(
         config_dir / SECRETS_FILENAME, passphrase, reason="no OS keychain available"
     )
@@ -304,7 +414,7 @@ def open_store(
                 "this session; run from a desktop session or re-run `storepulse init` "
                 "(see README, 'Where secrets live')"
             )
-        return KeyringStore()
+        return KeyringStore(config_dir=config_dir)
     if kind == STORE_FILE:
         return EncryptedFileStore(config_dir / SECRETS_FILENAME, passphrase)
     raise SecretStoreError(f"unknown secret store {kind!r} in config; re-run `storepulse init`")
