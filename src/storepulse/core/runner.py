@@ -183,7 +183,8 @@ def collect_apple_sales(
             raise
         except Exception as exc:
             message = redact(f"{type(exc).__name__}: {exc}")
-            log.error("%s %s failed: %s", source, iso, message)
+            # Reported by the caller (grouped with group_errors); info avoids printing twice.
+            log.info("%s %s failed: %s", source, iso, message)
             summary.errors.append((day, message))
             db.log_ingest(
                 conn,
@@ -234,6 +235,29 @@ def _remap_pending(
             progress(day, f"re-mapped in-app purchases, {written} rows")
 
 
+def group_errors(errors: Iterable[tuple[object, str]]) -> list[str]:
+    """One line per distinct failure.
+
+    The same failure for many apps or days (e.g. a bucket 403 before Play permissions
+    take effect) becomes one line naming them all, instead of one wall of text each.
+    Each error's subject (its label's first word: a package, date or month) is blanked
+    out of the message so identical failures compare equal.
+    """
+    groups: dict[str, tuple[str, list[str]]] = {}
+    for label, message in errors:
+        text = str(label)
+        subject = text.split()[0] if text.strip() else ""
+        key = message.replace(subject, "…") if subject else message
+        groups.setdefault(key, (message, []))[1].append(text)
+    lines = []
+    for key, (first_message, labels) in groups.items():
+        if len(labels) == 1:
+            lines.append(f"{labels[0]}: {first_message}")
+        else:
+            lines.append(f"{len(labels)} failed the same way ({', '.join(labels)}): {key}")
+    return lines
+
+
 # -- Google Play ---------------------------------------------------------------------------
 
 
@@ -266,7 +290,7 @@ def _error(
     app_id: int | None = None,
 ) -> None:
     message = redact(f"{type(exc).__name__}: {exc}")
-    log.error("%s %s failed: %s", summary.source, label, message)
+    log.info("%s %s failed: %s", summary.source, label, message)  # caller reports it
     summary.errors.append((label, message))
     db.log_ingest(
         conn,
@@ -644,7 +668,8 @@ def collect_play_vitals(
                     app_id=app_id,
                 )
         if progress:
-            progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready")
+            no_data = ", no data from Google" if ready and not rows else ""
+            progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready{no_data}")
     return summary
 
 
@@ -737,7 +762,9 @@ def _run_apple(
         log.error("apple_sales failed: %s", message)
         return f"apple_sales: {message}"
     if summary.errors:
-        return f"apple_sales: {len(summary.errors)} of {len(dates)} day(s) failed"
+        return f"apple_sales: {len(summary.errors)} of {len(dates)} day(s) failed: " + "; ".join(
+            group_errors(summary.errors)
+        )
     return None
 
 
@@ -758,7 +785,7 @@ def _run_play_source(
         log.error("%s failed: %s", label, message)
         return f"{label}: {message}"
     if summary.errors:
-        return f"{label}: {len(summary.errors)} failed"
+        return f"{label}: {len(summary.errors)} failed: " + "; ".join(group_errors(summary.errors))
     return None
 
 
@@ -775,7 +802,9 @@ def _run_play_vitals(
         log.error("play_vitals failed: %s", message)
         return f"play_vitals: {message}"
     if summary.errors:
-        return f"play_vitals: {len(summary.errors)} failed"
+        return f"play_vitals: {len(summary.errors)} failed: " + "; ".join(
+            group_errors(summary.errors)
+        )
     return None
 
 

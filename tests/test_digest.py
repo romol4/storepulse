@@ -606,3 +606,197 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
         "  deskFT (iOS): 70 installs, $105.00\n"
         "  billFT (Android): 56 installs, $20.00\n"
     )
+
+
+# -- dogfood follow-ups (first live run, Sep 28) ------------------------------------------
+
+
+def _email_like_account(conn: sqlite3.Connection) -> dict[str, int]:
+    """Mirrors the first live digest: iOS data only, Play bucket still 403 (no installs
+    rows, play_installs in error), two Android apps both named "Bus Wise"."""
+    ids = {
+        "echo_ios": db.upsert_app(conn, "ios", "10", "echoFT"),
+        "lib_ios": db.upsert_app(conn, "ios", "11", "libFT"),
+        "quiet_ios": db.upsert_app(conn, "ios", "12", "TAK ft"),
+        "bus_a": db.upsert_app(conn, "android", "com.jasonsb.busarrival", "Bus Wise"),
+        "bus_b": db.upsert_app(conn, "android", "com.logicftinc.buswise", "Bus Wise"),
+    }
+    for i in range(7):
+        d = (AS_OF - timedelta(days=i)).isoformat()
+        rows = [db.MetricRow(d, ids["echo_ios"], "US", "installs", "", 4.0)]
+        if i == 0:
+            rows.append(db.MetricRow(d, ids["lib_ios"], "US", "installs", "", 1.0))
+        db.replace_source_day(conn, "apple_sales", d, rows)
+        _log(conn, "apple_sales", d)
+    db.log_ingest(
+        conn,
+        source="play_installs",
+        report_date="2026-09-01",
+        started_at=db.utc_now(),
+        status="error",
+        note="403",
+        app_id=ids["bus_a"],
+    )
+    return ids
+
+
+def test_platform_without_data_is_a_dash_not_zero(conn: sqlite3.Connection) -> None:
+    _email_like_account(conn)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    installs_line = result.text.splitlines()[1]
+    assert installs_line == "Installs  29 (new)   iOS 29 · Android —"
+    assert "Android —" in result.html
+    # The unavailable platform's apps aren't listed as "0 installs"...
+    assert "(Android)" not in result.text
+    # ...and the Data line says why.
+    assert "play_installs error" in result.text
+
+
+def test_unavailable_platform_is_left_out_of_the_trend(conn: sqlite3.Connection) -> None:
+    ios = db.upsert_app(conn, "ios", "1", "deskFT")
+    db.upsert_app(conn, "android", "com.x", "billFT")  # registered, but no installs rows
+    for i in range(14):
+        d = (AS_OF - timedelta(days=i)).isoformat()
+        _apple_day(conn, d, ios, installs=10.0 if i < 7 else 5.0, proceeds=0)
+        _log(conn, "apple_sales", d)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert result.text.splitlines()[1] == "Installs  70 (+100% wk)   iOS 70 · Android —"
+    assert "billFT" not in result.text  # not listed, and not counted as a quiet app
+    assert "more app" not in result.text
+
+
+def test_same_named_apps_show_their_store_id(conn: sqlite3.Connection) -> None:
+    a = db.upsert_app(conn, "android", "com.jasonsb.busarrival", "Bus Wise")
+    b = db.upsert_app(conn, "android", "com.logicftinc.buswise", "Bus Wise")
+    ios = db.upsert_app(conn, "ios", "7", "Bus Wise")  # other platform: no clash
+    day = AS_OF.isoformat()
+    db.replace_source_range(
+        conn,
+        "play_installs",
+        day,
+        day,
+        [
+            db.MetricRow(day, a, "ALL", "installs", "", 3.0),
+            db.MetricRow(day, b, "ALL", "installs", "", 2.0),
+        ],
+    )
+    _apple_day(conn, AS_OF.isoformat(), ios, installs=1.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Bus Wise [com.jasonsb.busarrival] (Android): 3 installs" in result.text
+    assert "Bus Wise [com.logicftinc.buswise] (Android): 2 installs" in result.text
+    assert "  Bus Wise (iOS): 1 install," in result.text
+
+
+def test_quiet_apps_collapse_into_one_line(conn: sqlite3.Connection) -> None:
+    _email_like_account(conn)
+    db.upsert_app(conn, "ios", "13", "Bus Wiser")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    apps = result.text.split("Apps\n", 1)[1]
+    assert apps == (
+        "  echoFT (iOS): 28 installs, no proceeds\n"
+        "  libFT (iOS): 1 install, no proceeds\n"
+        "  +2 more apps with no installs or proceeds in either week\n"
+    )
+    assert "+2 more apps with no installs or proceeds in either week" in result.html
+    assert len(result.images) == 2  # sparklines only for the listed apps
+
+
+def test_app_active_last_week_only_is_still_listed(conn: sqlite3.Connection) -> None:
+    ios = db.upsert_app(conn, "ios", "1", "deskFT")
+    other = db.upsert_app(conn, "ios", "2", "libFT")
+    d_prev = (AS_OF - timedelta(days=8)).isoformat()
+    _apple_day(conn, d_prev, ios, installs=5.0, proceeds=0)
+    _apple_day(conn, AS_OF.isoformat(), other, installs=1.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "deskFT (iOS): 0 installs, no proceeds" in result.text
+    assert "more app" not in result.text
+
+
+def test_singular_install(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "Top app   deskFT 1 install\n" in result.text
+    assert "deskFT (iOS): 1 install, no proceeds" in result.text
+    assert "1 installs" not in result.text + result.html
+
+
+def test_vitals_without_values_says_no_data(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1.0)
+    _log(conn, "play_installs", "2026-09-01")
+    # Collected fine (logged ok) but Google returned no values: no daily_metrics rows.
+    _log(conn, "play_vitals", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "vitals ok (no data from Google)" in result.text
+
+
+# -- PR #4 review round 1 ---------------------------------------------------------------
+
+
+def _vitals(conn: sqlite3.Connection, app_id: int, crash_28d: float) -> None:
+    d = AS_OF.isoformat()
+    db.replace_source_range(
+        conn,
+        "play_vitals",
+        d,
+        d,
+        [db.MetricRow(d, app_id, "ALL", "crash_rate_28d", "", crash_28d)],
+        app_ids=[app_id],
+    )
+
+
+def test_quiet_app_keeps_its_crash_warning(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """An app with no installs in either week is collapsed, but its over-threshold
+    crash rate must still be warned about: vitals don't depend on installs."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=5.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=0.0)
+    _log(conn, "play_installs", "2026-09-01")
+    _vitals(conn, android_id, 0.02)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Vitals    billFT Android crash rate 2.0% ⚠" in result.text
+    assert "billFT Android crash rate 2.0%" in result.html
+    assert "+1 more app with no installs or proceeds in either week" in result.text
+
+
+def test_crash_warning_survives_unreachable_installs_bucket(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The live account's shape: the Play bucket is still 403 (no installs rows, so
+    Android shows "—"), but vitals come from the Reporting API and still load."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=5.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _vitals(conn, android_id, 0.02)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Android —" in result.text
+    assert "billFT Android crash rate 2.0% ⚠" in result.text
+
+
+def test_stale_apple_does_not_make_android_a_dash(conn: sqlite3.Connection) -> None:
+    """as_of is the earliest platform's latest day, so a stalled Apple drags the window
+    back. Android has data (just none in that old window) and must not read "—"."""
+    ios = db.upsert_app(conn, "ios", "1", "deskFT")
+    android = db.upsert_app(conn, "android", "com.x", "billFT")
+    apple_last = date(2026, 9, 6)
+    for i in range(14):
+        d = (apple_last - timedelta(days=i)).isoformat()
+        _apple_day(conn, d, ios, installs=2.0, proceeds=0)
+        _log(conn, "apple_sales", d)
+    rows = []
+    for i in range(7):
+        d = (AS_OF - timedelta(days=i)).isoformat()  # Sep 20-26 only
+        rows.append(db.MetricRow(d, android, "ALL", "installs", "", 3.0))
+    db.replace_source_range(conn, "play_installs", "2026-09-20", "2026-09-26", rows)
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert result.as_of == apple_last
+    assert "Android —" not in result.text
+    assert result.text.splitlines()[1] == "Installs  14 (+0% wk)   iOS 14 · Android 0"
