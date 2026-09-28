@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import sqlite3
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 
-from storepulse.core import db
+from storepulse.core import config, db, digest, discovery, mailer
 from storepulse.core.secrets import redact
 from storepulse.core.sources import (
     apple_sales,
@@ -24,6 +27,7 @@ from storepulse.core.sources.google_client import (
     BULK_PERMISSION,
     FINANCIAL_PERMISSION,
     GoogleClient,
+    parse_bucket_uri,
 )
 from storepulse.core.sources.play_common import Month, decode_csv, plan_month, read_zip_csv
 
@@ -258,6 +262,8 @@ def _error(
     report_date: str,
     started: str,
     exc: Exception,
+    *,
+    app_id: int | None = None,
 ) -> None:
     message = redact(f"{type(exc).__name__}: {exc}")
     log.error("%s %s failed: %s", summary.source, label, message)
@@ -269,6 +275,7 @@ def _error(
         started_at=started,
         status="error",
         note=f"{label}: {message}",
+        app_id=app_id,
     )
 
 
@@ -279,6 +286,8 @@ def _month_status(
     month: Month,
     plan: str,
     progress: Callable[[str, str], None] | None,
+    *,
+    app_id: int | None = None,
 ) -> bool:
     """Handle every plan except "collect". Returns True if the month needs collecting."""
     if plan == "collect":
@@ -291,7 +300,12 @@ def _month_status(
     if plan == "not_ready":
         summary.not_ready.append(label)
         db.log_ingest(
-            conn, source=summary.source, report_date=iso, started_at=started, status="not_ready"
+            conn,
+            source=summary.source,
+            report_date=iso,
+            started_at=started,
+            status="not_ready",
+            app_id=app_id,
         )
         outcome = "not ready yet"
     else:
@@ -304,6 +318,7 @@ def _month_status(
             status="ok",
             rows=0,
             note=f"{label}: no file",
+            app_id=app_id,
         )
         outcome = "no file"
     if progress:
@@ -330,7 +345,15 @@ def collect_play_installs(
                 o.name for o in client.list_objects(bucket, play_installs.object_prefix(package))
             ]
         except Exception as exc:
-            _error(conn, summary, package, months[-1].first_day.isoformat(), db.utc_now(), exc)
+            _error(
+                conn,
+                summary,
+                package,
+                months[-1].first_day.isoformat(),
+                db.utc_now(),
+                exc,
+                app_id=app_id,
+            )
             continue
         files = play_installs.month_files(names, package)
         if not files:
@@ -344,7 +367,7 @@ def collect_play_installs(
         for month in months:
             label = f"{package} {month}"
             plan = plan_month(month, set(files), today)
-            if not _month_status(conn, summary, label, month, plan, progress):
+            if not _month_status(conn, summary, label, month, plan, progress, app_id=app_id):
                 continue
             started = db.utc_now()
             try:
@@ -366,7 +389,9 @@ def collect_play_installs(
                     app_ids=[app_id],
                 )
             except Exception as exc:
-                _error(conn, summary, label, month.first_day.isoformat(), started, exc)
+                _error(
+                    conn, summary, label, month.first_day.isoformat(), started, exc, app_id=app_id
+                )
                 if progress:
                     progress(label, "error")
                 continue
@@ -380,6 +405,7 @@ def collect_play_installs(
                 status="ok",
                 rows=written,
                 note=package,
+                app_id=app_id,
             )
             if progress:
                 progress(label, f"ok, {written} rows")
@@ -586,7 +612,7 @@ def collect_play_vitals(
                     app_ids=[app_id],
                 )
         except Exception as exc:
-            _error(conn, summary, package, dates[-1].isoformat(), started, exc)
+            _error(conn, summary, package, dates[-1].isoformat(), started, exc, app_id=app_id)
             if progress:
                 progress(package, "error")
             continue
@@ -604,6 +630,7 @@ def collect_play_vitals(
                     status="ok",
                     rows=per_day[iso],
                     note=package,
+                    app_id=app_id,
                 )
             else:
                 summary.not_ready.append(f"{package} {iso}")
@@ -614,7 +641,221 @@ def collect_play_vitals(
                     started_at=started,
                     status="not_ready",
                     note=package,
+                    app_id=app_id,
                 )
         if progress:
             progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready")
     return summary
+
+
+# -- one full run: lock, collect every configured source, then the digest ------------------
+
+LOCK_FILENAME = "run.lock"
+STALE_LOCK_HOURS = 6
+
+
+class LockedError(Exception):
+    """Another run appears to be in progress (a non-stale lock file exists)."""
+
+
+def _lock_is_stale(path: Path) -> bool:
+    try:
+        age_seconds = time.time() - path.stat().st_mtime
+    except OSError:
+        return True
+    return age_seconds > STALE_LOCK_HOURS * 3600
+
+
+@contextlib.contextmanager
+def _run_lock(data_dir: Path) -> Iterator[None]:
+    """A lock file created with O_CREAT|O_EXCL, so only one run proceeds at a time.
+
+    Works the same way on all three OSes. A lock older than STALE_LOCK_HOURS is assumed to
+    belong to a crashed run and is taken over; anything younger raises LockedError.
+    """
+    path = data_dir / LOCK_FILENAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = f"{os.getpid()} {db.utc_now()}\n".encode()
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if not _lock_is_stale(path):
+            raise LockedError(
+                f"another run appears to be in progress ({path}); if it isn't, delete that file"
+            ) from None
+        log.warning(
+            "%s is older than %d hours; assuming a crashed run and taking it over",
+            path,
+            STALE_LOCK_HOURS,
+        )
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        os.write(fd, payload)
+        os.close(fd)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+@dataclass
+class RunAllResult:
+    errors: list[str] = field(default_factory=list)
+    email_sent: bool = False
+    email_error: str | None = None
+    digest: digest.Digest | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors and self.email_error is None
+
+
+def _run_apple(
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    client: AppleClient,
+    days: int,
+    today: date,
+    progress: Callable[[str, str], None],
+) -> str | None:
+    assert cfg.apple is not None
+    yesterday = today - timedelta(days=1)
+    dates = [yesterday - timedelta(days=i) for i in reversed(range(days))]
+    try:
+        summary = collect_apple_sales(
+            conn,
+            client,
+            cfg.apple.vendor_number,
+            dates,
+            today=today,
+            progress=lambda d, outcome: progress(d.isoformat(), outcome),
+        )
+    except Exception as exc:  # one failing source never blocks the others or the digest
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("apple_sales failed: %s", message)
+        return f"apple_sales: {message}"
+    if summary.errors:
+        return f"apple_sales: {len(summary.errors)} of {len(dates)} day(s) failed"
+    return None
+
+
+def _run_play_source(
+    label: str,
+    collect: Callable[..., PlaySummary],
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    bucket: str,
+    months: list[Month],
+    today: date,
+    progress: Callable[[str, str], None],
+) -> str | None:
+    try:
+        summary = collect(conn, client, bucket, months, today=today, progress=progress)
+    except Exception as exc:
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("%s failed: %s", label, message)
+        return f"{label}: {message}"
+    if summary.errors:
+        return f"{label}: {len(summary.errors)} failed"
+    return None
+
+
+def _run_play_vitals(
+    conn: sqlite3.Connection,
+    client: GoogleClient,
+    dates: list[date],
+    progress: Callable[[str, str], None],
+) -> str | None:
+    try:
+        summary = collect_play_vitals(conn, client, dates, progress=progress)
+    except Exception as exc:
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("play_vitals failed: %s", message)
+        return f"play_vitals: {message}"
+    if summary.errors:
+        return f"play_vitals: {len(summary.errors)} failed"
+    return None
+
+
+def run_all(
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    *,
+    apple_client: AppleClient | None = None,
+    google_client: GoogleClient | None = None,
+    smtp_password: str | None = None,
+    days: int | None = None,
+    send_email: bool = True,
+    today: date | None = None,
+    smtp_factory: mailer.SMTPFactory | None = None,
+    progress: Callable[[str, str], None] | None = None,
+) -> RunAllResult:
+    """Collect every configured source independently, then build and send the digest.
+
+    One failing source never blocks the others or the digest (docs/SPEC.md). Callers
+    build ``apple_client``/``google_client`` from the secret store themselves (this module
+    never touches secrets directly), and pass ``None`` for a platform that isn't
+    configured or whose client couldn't be built.
+    """
+    days = days if days is not None else cfg.schedule.days
+    today = today if today is not None else apple_sales.pacific_today()
+    report: Callable[[str, str], None] = progress or (lambda _label, _outcome: None)
+    result = RunAllResult()
+
+    with _run_lock(config.data_dir()):
+        if cfg.apple is not None and apple_client is not None:
+            error = _run_apple(conn, cfg, apple_client, days, today, report)
+            if error:
+                result.errors.append(error)
+
+        if cfg.google is not None and google_client is not None:
+            bucket = parse_bucket_uri(cfg.google.bucket_uri)
+            try:
+                found = discovery.refresh_play_apps(google_client, conn, bucket)
+                if found.status != "ok":
+                    report("play_discovery", found.message)
+            except Exception as exc:
+                message = redact(f"{type(exc).__name__}: {exc}")
+                log.error("play_discovery failed: %s", message)
+                result.errors.append(f"play_discovery: {message}")
+
+            current_month = Month.of(today)
+            months = sorted({current_month.prev(), current_month})
+            earnings_months = sorted({current_month.prev().prev(), current_month.prev()})
+            # Ends at yesterday, like apple_sales: play_vitals is also a daily-cadence
+            # source (docs/SPEC.md), so today's data isn't expected to be ready yet.
+            vitals_yesterday = today - timedelta(days=1)
+            vitals_dates = [vitals_yesterday - timedelta(days=i) for i in reversed(range(days))]
+
+            for label, collect, periods in (
+                ("play_installs", collect_play_installs, months),
+                ("play_sales", collect_play_sales, months),
+                ("play_earnings", collect_play_earnings, earnings_months),
+            ):
+                error = _run_play_source(
+                    label, collect, conn, google_client, bucket, periods, today, report
+                )
+                if error:
+                    result.errors.append(error)
+
+            vitals_error = _run_play_vitals(conn, google_client, vitals_dates, report)
+            if vitals_error:
+                result.errors.append(vitals_error)
+
+        built = digest.build_digest(conn, cfg, today=today)
+        result.digest = built
+
+        if send_email:
+            if cfg.email is None or smtp_password is None:
+                result.email_error = "email isn't configured yet; run `storepulse init`"
+            else:
+                try:
+                    email_message = digest.to_email_message(built, cfg.email)
+                    mailer.send(cfg.email, smtp_password, email_message, factory=smtp_factory)
+                    result.email_sent = True
+                except mailer.MailerError as exc:
+                    result.email_error = str(exc)
+
+    return result

@@ -12,7 +12,7 @@ from typing import TextIO
 
 import httpx
 
-from storepulse.core import config
+from storepulse.core import config, mailer
 from storepulse.core.secrets import (
     SECRETS_FILENAME,
     SecretStore,
@@ -26,6 +26,23 @@ from storepulse.core.sources.google_client import GoogleClient
 
 APPLE_P8_SECRET = "apple_p8"  # noqa: S105 (secret name, not a value)
 GOOGLE_SA_SECRET = "google_sa"  # noqa: S105 (secret name, not a value)
+SMTP_PASSWORD_SECRET = "smtp_password"  # noqa: S105 (secret name, not a value)
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """The outcome of one subprocess call, for `schedule`'s OS-native commands."""
+
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+CommandRunner = Callable[[list[str]], CommandResult]
 
 
 @dataclass
@@ -40,6 +57,8 @@ class Env:
     sleep: Callable[[float], None] | None = None
     today: date | None = None
     store_factory: Callable[[Path, Callable[[], str]], SecretStore] | None = None
+    smtp_factory: mailer.SMTPFactory | None = None
+    command_runner: CommandRunner | None = None
 
     def say(self, text: str = "") -> None:
         print(text, file=self.stdout)

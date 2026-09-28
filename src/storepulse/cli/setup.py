@@ -1,8 +1,9 @@
-"""`storepulse init`: guided, validated setup for Apple and Google Play."""
+"""`storepulse init`: guided, validated setup for Apple, Google Play and email."""
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,10 +12,12 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 from storepulse.cli import collect
+from storepulse.cli import schedule as schedule_cli
 from storepulse.cli.checks import Check, CheckResult, check_apple, check_google
 from storepulse.cli.common import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    SMTP_PASSWORD_SECRET,
     CliError,
     Env,
     apple_client,
@@ -24,7 +27,8 @@ from storepulse.cli.common import (
     google_client,
     store_for_setup,
 )
-from storepulse.core import config, db, discovery
+from storepulse.core import config, db, discovery, mailer
+from storepulse.core.config import EMAIL_SECURITY_MODES
 from storepulse.core.secrets import SecretStore
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import (
@@ -165,10 +169,89 @@ def _setup_google(
     return Setup(google, raw, sa_path, result, clean=clean)
 
 
+def _email_password(env: Env, cfg: config.Config, secrets: Callable[[], SecretStore]) -> str:
+    if cfg.secret_store and cfg.email is not None:
+        answer = env.getpass("SMTP password (Enter to keep the saved password): ")
+        if answer:
+            return answer
+        stored = secrets().get(SMTP_PASSWORD_SECRET)
+        if stored is None:
+            raise CliError("no saved SMTP password found; enter it again")
+        return stored
+    return env.getpass("SMTP password: ")
+
+
+def _setup_email(
+    env: Env, cfg: config.Config, secrets: Callable[[], SecretStore]
+) -> Setup[config.EmailConfig]:
+    prev = cfg.email
+    env.say()
+    env.say("Email")
+    env.say("Storepulse sends the daily digest through your own SMTP server")
+    env.say("(README, 'SMTP setup').")
+    host = ask(env, "SMTP host", prev.host if prev else "")
+    port = ask_positive_int(env, "SMTP port", prev.port if prev else 587)
+    security = (
+        ask(env, "Security (starttls/ssl)", prev.security if prev else "starttls").strip().lower()
+    )
+    if security not in EMAIL_SECURITY_MODES:
+        raise CliError(f"security must be one of {EMAIL_SECURITY_MODES}, got {security!r}")
+    username = ask(env, "SMTP username", prev.username if prev else "")
+    password = _email_password(env, cfg, secrets)
+    from_addr = ask(env, "From address", prev.from_addr if prev else username)
+    to_default = ", ".join(prev.to_addrs) if prev else from_addr
+    to_addrs = [
+        a.strip()
+        for a in ask(env, "To address(es), comma-separated", to_default).split(",")
+        if a.strip()
+    ]
+    if not to_addrs:
+        raise CliError("at least one To address is required")
+    email_cfg = config.EmailConfig(
+        host=host,
+        port=port,
+        security=security,
+        username=username,
+        from_addr=from_addr,
+        to_addrs=to_addrs,
+    )
+    env.say("Sending a test email...")
+    try:
+        mailer.send(email_cfg, password, mailer.test_message(email_cfg), factory=env.smtp_factory)
+    except mailer.MailerError as exc:
+        raise CliError(str(exc)) from None
+    env.say(f"Test email sent to {', '.join(to_addrs)}.")
+    return Setup(
+        email_cfg, password, None, CheckResult(checks=[Check("ok", "test email sent")]), clean=True
+    )
+
+
+def _offer_schedule(env: Env, cfg: config.Config) -> None:
+    env.say()
+    run_time = ask(env, "Daily run time (HH:MM, local time)", cfg.schedule.run_time)
+    try:
+        schedule_cli.validate_time(run_time)
+    except CliError as exc:
+        env.warn(f"{exc}; keeping {cfg.schedule.run_time}")
+        run_time = cfg.schedule.run_time
+    cfg.schedule = dataclasses.replace(cfg.schedule, run_time=run_time)
+    config.save(cfg)
+    if confirm(env, "Install the daily schedule now?", default=True):
+        # Email/Apple/Google are already saved at this point; a schedule-install failure
+        # (e.g. no crontab/systemd/launchd reachable) must warn, not fail the whole init.
+        try:
+            schedule_cli.cmd_schedule_install(argparse.Namespace(time=run_time), env)
+        except CliError as exc:
+            env.warn(f"{exc}")
+            env.say("Run `storepulse schedule install` any time to try again.")
+    else:
+        env.say("Run `storepulse schedule install` any time to automate this.")
+
+
 def cmd_init(args: argparse.Namespace, env: Env) -> int:
     cfg = config.load()
     env.say("Storepulse setup. Each platform is optional; set up at least one.")
-    apple = google = None
+    apple = google = email = None
     # One store for the whole run, opened on first use: reading a saved key and saving
     # both go through it, so an encrypted-file store asks for its passphrase only once.
     secrets = functools.cache(functools.partial(store_for_setup, env, cfg))
@@ -178,9 +261,11 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         apple = _setup_apple(env, cfg, secrets)
     if confirm(env, "Set up Google Play?", default=cfg.google is None):
         google = _setup_google(env, cfg, secrets)
-    if apple is None and google is None:
+    if confirm(env, "Set up email for the daily digest?", default=cfg.email is None):
+        email = _setup_email(env, cfg, secrets)
+    if apple is None and google is None and email is None:
         if cfg.apple is None and cfg.google is None:
-            raise CliError("nothing was set up; answer yes for Apple or Google Play")
+            raise CliError("nothing was set up; answer yes for Apple, Google Play, or email")
         env.say("Nothing changed.")
         return 0
 
@@ -192,6 +277,9 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
     if google is not None:
         store.set(GOOGLE_SA_SECRET, google.secret)
         cfg.google = google.config
+    if email is not None:
+        store.set(SMTP_PASSWORD_SECRET, email.secret)
+        cfg.email = email.config
     cfg.secret_store = store.kind
     cfg_path = config.save(cfg)
     env.say()
@@ -200,6 +288,8 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         env.say(f"  .p8 fingerprint {store.fingerprint(APPLE_P8_SECRET)}")
     if google is not None:
         env.say(f"  service account fingerprint {store.fingerprint(GOOGLE_SA_SECRET)}")
+    if email is not None:
+        env.say(f"  SMTP password fingerprint {store.fingerprint(SMTP_PASSWORD_SECRET)}")
     env.say(f"Settings saved to: {cfg_path}")
     for saved in (apple, google):
         # Only once setup fully worked; after "save anyway" the file may still be needed.
@@ -221,24 +311,31 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
             for store_id, name in registered:
                 env.say(f"  - {name} ({store_id})")
         env.say()
+        status = 0
         if args.no_backfill or not confirm(env, "Load historical data now?"):
             env.say("Done. Run `storepulse backfill --help` to load history any time.")
-            return 0
-        status = 0
-        yesterday = env.pacific_today() - timedelta(days=1)
-        if apple is not None:
-            days = ask_positive_int(env, "Apple: how many days back", DEFAULT_APPLE_DAYS)
-            status |= collect.backfill_apple(
-                env, conn, cfg, yesterday - timedelta(days=days - 1), yesterday
-            )
-        if google is not None:
-            months = ask_positive_int(env, "Google Play: how many months back", DEFAULT_PLAY_MONTHS)
-            span = last_months(months, env.pacific_today())
-            status |= collect.backfill_play(env, conn, cfg, list(collect.PLAY_MONTHLY), months=span)
-            vitals_days = [
-                yesterday - timedelta(days=i) for i in reversed(range(DEFAULT_VITALS_DAYS))
-            ]
-            status |= collect.backfill_play(env, conn, cfg, ["play_vitals"], dates=vitals_days)
-        return status
+        else:
+            yesterday = env.pacific_today() - timedelta(days=1)
+            if apple is not None:
+                days = ask_positive_int(env, "Apple: how many days back", DEFAULT_APPLE_DAYS)
+                status |= collect.backfill_apple(
+                    env, conn, cfg, yesterday - timedelta(days=days - 1), yesterday
+                )
+            if google is not None:
+                months = ask_positive_int(
+                    env, "Google Play: how many months back", DEFAULT_PLAY_MONTHS
+                )
+                span = last_months(months, env.pacific_today())
+                status |= collect.backfill_play(
+                    env, conn, cfg, list(collect.PLAY_MONTHLY), months=span
+                )
+                vitals_days = [
+                    yesterday - timedelta(days=i) for i in reversed(range(DEFAULT_VITALS_DAYS))
+                ]
+                status |= collect.backfill_play(env, conn, cfg, ["play_vitals"], dates=vitals_days)
     finally:
         conn.close()
+
+    if cfg.email is not None:
+        _offer_schedule(env, cfg)
+    return status
