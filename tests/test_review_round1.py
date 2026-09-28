@@ -58,8 +58,8 @@ def test_other_403_keeps_apples_detail(p8_pem: str) -> None:
 
 
 def _init_env(fake: FakeApple, p8_file: Path) -> Env:
-    # Set up Apple? yes, four Apple prompts, set up Google? no, backfill? no.
-    answers = iter(["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n"])
+    # Set up Apple? yes, four Apple prompts, set up Google? no, email? no, backfill? no.
+    answers = iter(["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n", "n"])
     return Env(
         stdout=io.StringIO(),
         stderr=io.StringIO(),

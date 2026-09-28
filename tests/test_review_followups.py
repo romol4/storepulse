@@ -161,9 +161,9 @@ def test_reinit_with_saved_key_asks_passphrase_once(
         )
 
     uri = f"gs://{BUCKET}/"
-    assert main(["init", "--no-backfill"], env(["n", "y", str(key), uri])) == 0
+    assert main(["init", "--no-backfill"], env(["n", "y", str(key), uri, "n"])) == 0
     assert len(prompts) == 2  # choose + repeat the new passphrase
     prompts.clear()
     # Google again, Enter at the key path to keep the saved key, same bucket.
-    assert main(["init", "--no-backfill"], env(["n", "y", "", uri])) == 0
+    assert main(["init", "--no-backfill"], env(["n", "y", "", uri, "n"])) == 0
     assert prompts == ["Secrets file passphrase: "]

@@ -8,6 +8,7 @@ from storepulse.cli.checks import Check, check_apple, check_google, check_vitals
 from storepulse.cli.common import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    SMTP_PASSWORD_SECRET,
     CliError,
     Env,
     apple_client,
@@ -15,7 +16,7 @@ from storepulse.cli.common import (
     store_for_run,
 )
 from storepulse.cli.setup import report
-from storepulse.core import config, db, discovery
+from storepulse.core import config, db, discovery, mailer
 from storepulse.core.secrets import SecretStoreError
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import parse_bucket_uri
@@ -23,7 +24,7 @@ from storepulse.core.sources.google_client import parse_bucket_uri
 
 def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
     cfg = config.load()
-    if cfg.apple is None and cfg.google is None:
+    if cfg.apple is None and cfg.google is None and cfg.email is None:
         raise CliError("nothing is set up yet; run `storepulse init` first")
     checks: list[Check] = []
 
@@ -86,7 +87,22 @@ def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
                     gresult.checks += check_vitals(gclient, packages)
                 section("Google Play", gresult.checks)
 
-    env.say("SMTP: not configured yet (arrives with the daily email).")
+    if cfg.email is None:
+        # Not configured is not itself a warning, matching how an unconfigured Apple or
+        # Google is silently skipped above rather than counted against the tally.
+        env.say("SMTP: not configured yet; run `storepulse init` to add it.")
+    else:
+        password = store.get(SMTP_PASSWORD_SECRET)
+        if password is None:
+            section("SMTP", [Check("fail", "no SMTP password saved; run `storepulse init` again")])
+        else:
+            try:
+                mailer.check(cfg.email, password, factory=env.smtp_factory)
+            except mailer.MailerError as exc:
+                section("SMTP", [Check("fail", str(exc))])
+            else:
+                section("SMTP", [Check("ok", f"login and NOOP succeeded for {cfg.email.host}")])
+
     env.say("(doctor reads metadata only; the Apple check requests one day's sales report.)")
     failed = [c for c in checks if c.level == "fail"]
     env.say()
