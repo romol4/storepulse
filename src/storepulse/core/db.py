@@ -174,19 +174,50 @@ def replace_source_day(
     now = utc_now()
     with transaction(conn):
         conn.execute("DELETE FROM daily_metrics WHERE source = ? AND date = ?", (source, date))
-        conn.executemany(
-            "INSERT INTO daily_metrics "
-            "(date, app_id, country, metric, currency, value, source, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (date, app_id, country, metric, currency) DO UPDATE SET "
-            "value = excluded.value, source = excluded.source, "
-            "updated_at = excluded.updated_at",
-            [
-                (r.date, r.app_id, r.country, r.metric, r.currency, r.value, source, now)
-                for r in batch
-            ],
-        )
+        _insert_owned(conn, source, batch, now)
     return len(batch)
+
+
+class SourceCollisionError(ValueError):
+    """A row's key is already owned by another source; nothing was written."""
+
+
+_UPSERT = (
+    "INSERT INTO daily_metrics "
+    "(date, app_id, country, metric, currency, value, source, updated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT (date, app_id, country, metric, currency) DO UPDATE SET "
+    "value = excluded.value, updated_at = excluded.updated_at "
+    # Only a row's own source may overwrite it; a collision changes nothing and is
+    # detected below instead of silently transferring ownership.
+    "WHERE daily_metrics.source = excluded.source"
+)
+
+
+def _insert_owned(conn: sqlite3.Connection, source: str, batch: list[MetricRow], now: str) -> None:
+    """Upsert rows for ``source``; raise SourceCollisionError if another source owns a key.
+
+    Must run inside a transaction so a collision rolls back the whole replacement.
+    """
+    before = conn.total_changes
+    conn.executemany(
+        _UPSERT,
+        [(r.date, r.app_id, r.country, r.metric, r.currency, r.value, source, now) for r in batch],
+    )
+    if conn.total_changes - before == len(batch):
+        return
+    for r in batch:
+        owner = conn.execute(
+            "SELECT source FROM daily_metrics "
+            "WHERE date = ? AND app_id = ? AND country = ? AND metric = ? AND currency = ?",
+            (r.date, r.app_id, r.country, r.metric, r.currency),
+        ).fetchone()
+        if owner is not None and owner["source"] != source:
+            raise SourceCollisionError(
+                f"{source} tried to write {r.metric} for app {r.app_id} {r.country} {r.date}, "
+                f"but that row belongs to {owner['source']}; nothing was written"
+            )
+    raise SourceCollisionError(f"{source}: fewer rows were written than expected")
 
 
 def log_ingest(

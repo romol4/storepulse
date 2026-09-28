@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from storepulse.core import db
-from storepulse.core.sources.apple_client import AppleAuthError, AppleClient
+from storepulse.core.sources.apple_client import AppleAgreementError, AppleAuthError, AppleClient
 from storepulse.core.sources.apple_sales import sku_key
 
 DiscoveryStatus = Literal["ok", "permission_denied"]
@@ -51,7 +51,7 @@ def discover_apple(client: AppleClient, conn: sqlite3.Connection) -> DiscoveryRe
     try:
         apps = list_apple_apps(client)
     except AppleAuthError as exc:
-        if exc.status != 403:
+        if exc.status != 403 or isinstance(exc, AppleAgreementError):
             raise
         return DiscoveryResult(
             "permission_denied",

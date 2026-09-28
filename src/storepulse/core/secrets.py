@@ -182,13 +182,14 @@ class EncryptedFileStore:
         }
 
     def _passphrase(self) -> str:
+        # The env var wins so unattended runs never prompt; callers pass only their
+        # interactive prompt and never read the variable themselves.
         source = self._passphrase_source
-        if callable(source):
+        value = os.environ.get(PASSPHRASE_ENV, "")
+        if not value and callable(source):
             value = source()
-        elif isinstance(source, str):
+        elif not value and isinstance(source, str):
             value = source
-        else:
-            value = os.environ.get(PASSPHRASE_ENV, "")
         if not value:
             raise SecretStoreError(
                 f"a passphrase is required to unlock {self.path}; set {PASSPHRASE_ENV} "

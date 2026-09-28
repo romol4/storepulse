@@ -23,6 +23,7 @@ from storepulse.core.sources.apple_client import (
 )
 
 SOURCE = "apple_sales"
+UNKNOWN_COUNTRY = "ZZ"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 # Apple's reporting day is Pacific time; daily reports are kept for about a year.
@@ -41,6 +42,8 @@ FIRST_TIME_TYPES = frozenset({"1", "1F", "1T", "F1", "1E", "1EP", "1EU"})
 BUNDLE_TYPES = frozenset({"1-B", "F1-B"})
 REDOWNLOAD_TYPES = frozenset({"3", "3F", "3T", "F3"})
 UPDATE_TYPES = frozenset({"7", "7F", "7T", "F7"})
+# Restored in-app purchases (non-consumables): not purchases, so no unit metric.
+RESTORE_TYPES = frozenset({"IA3"})
 IAP_TYPES = frozenset({"IA1", "IA1-M", "IA9", "IA9-M", "IAY", "IAY-M", "IAC", "IAC-M", "FI1"})
 # Rows whose Apple Identifier is an app (so they may register a new app and its SKU).
 APP_ROW_TYPES = FIRST_TIME_TYPES | REDOWNLOAD_TYPES | UPDATE_TYPES
@@ -90,6 +93,8 @@ class MappedReport:
     unknown_types: Counter[str] = field(default_factory=Counter)
     unknown_units: Counter[str] = field(default_factory=Counter)
     unmapped_rows: int = 0
+    # Rows (IAPs, restores) whose parent SKU isn't known yet; a later app row may teach it.
+    unmapped_child_rows: int = 0
     new_apps: list[str] = field(default_factory=list)
 
     def note(self) -> str | None:
@@ -233,22 +238,30 @@ def map_rows(conn: sqlite3.Connection, report_date: date, rows: list[SalesRow]) 
     for row in rows:
         app_id = _resolve_app(conn, row)
         ptype = row.product_type
-        known = ptype in APP_ROW_TYPES or ptype in BUNDLE_TYPES or ptype in IAP_TYPES
+        known = (
+            ptype in APP_ROW_TYPES
+            or ptype in BUNDLE_TYPES
+            or ptype in IAP_TYPES
+            or ptype in RESTORE_TYPES
+        )
         if not known:
             result.unknown_types[ptype] += 1
             result.unknown_units[ptype] += int(row.units)
         if app_id is None:
             result.unmapped_rows += 1
+            if row.parent_id and ptype not in APP_ROW_TYPES:
+                result.unmapped_child_rows += 1
             continue
-        country = row.country or "ALL"
+        # ALL is reserved for source totals; an unknown country is the user-assigned ZZ.
+        country = row.country or UNKNOWN_COUNTRY
         if ptype in FIRST_TIME_TYPES or ptype in BUNDLE_TYPES:
             add(app_id, country, "installs", "", row.units)
         elif ptype in REDOWNLOAD_TYPES:
             add(app_id, country, "redownloads", "", row.units)
         elif ptype in IAP_TYPES:
             add(app_id, country, "iap_units", "", row.units)
-        # Updates carry no metric (not in the vocabulary). Unknown types still contribute
-        # proceeds so money totals match App Store Connect.
+        # Updates and restores carry no unit metric (not in the vocabulary). Unknown types
+        # still contribute proceeds so money totals match App Store Connect.
         proceeds = row.units * row.developer_proceeds
         if proceeds and row.currency:
             add(app_id, country, "proceeds", row.currency, proceeds)

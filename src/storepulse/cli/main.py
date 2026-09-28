@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
-import os
 import sqlite3
 import sys
 from collections.abc import Callable, Sequence
@@ -19,7 +18,6 @@ import httpx
 from storepulse import __version__
 from storepulse.core import config, db, discovery, runner
 from storepulse.core.secrets import (
-    PASSPHRASE_ENV,
     SECRETS_FILENAME,
     RedactingFilter,
     SecretStore,
@@ -30,6 +28,7 @@ from storepulse.core.secrets import (
 )
 from storepulse.core.sources import apple_sales
 from storepulse.core.sources.apple_client import (
+    AppleAgreementError,
     AppleAuthError,
     AppleClient,
     AppleError,
@@ -85,17 +84,16 @@ def _confirm(env: Env, prompt: str, default: bool = True) -> bool:
 
 
 def _existing_passphrase(env: Env) -> Callable[[], str]:
+    """Interactive prompt only; the store itself prefers STOREPULSE_PASSPHRASE."""
+
     def prompt() -> str:
-        return os.environ.get(PASSPHRASE_ENV) or env.getpass("Secrets file passphrase: ")
+        return env.getpass("Secrets file passphrase: ")
 
     return prompt
 
 
 def _new_passphrase(env: Env, path: Path) -> Callable[[], str]:
     def prompt() -> str:
-        from_env = os.environ.get(PASSPHRASE_ENV)
-        if from_env:
-            return from_env
         if path.exists():
             return env.getpass("Secrets file passphrase: ")
         env.say("No OS keychain is available, so secrets go in an encrypted file.")
@@ -149,7 +147,9 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
             apps = discovery.list_apple_apps(client)
             env.say(f"  OK Key accepted; {len(apps)} app(s) visible.")
         except AppleAuthError as exc:
-            if exc.status != 403:
+            # A plain 403 may just mean the role can't list apps; an agreement 403 blocks
+            # everything, so it fails here with Apple's reason.
+            if exc.status != 403 or isinstance(exc, AppleAgreementError):
                 raise
             env.say("  OK Key accepted, but it can't list apps (GET /v1/apps returned 403).")
             env.say("    Apps will be added from sales reports as they appear.")
@@ -163,13 +163,7 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         except AppleVendorError as exc:
             raise CliError(str(exc)) from None
         except AppleAuthError as exc:
-            if exc.status == 403:
-                raise CliError(
-                    "the key was accepted but can't download sales reports (HTTP 403): it "
-                    "lacks the Sales and Reports role. Edit the key in App Store Connect > "
-                    "Users and Access > Integrations. See README, 'Apple API key'."
-                ) from None
-            raise
+            raise CliError(str(exc)) from None
         if result.status == "ok":
             env.say(f"  OK Sales report for {check_day} downloaded; vendor number confirmed.")
         elif result.status == "no_sales":
@@ -307,8 +301,19 @@ def _backfill_apple(
             f"unrecognized product types (only proceeds counted): {codes}. "
             "Please report them so they can be mapped."
         )
+    if summary.remapped:
+        env.say(
+            f"Re-mapped in-app purchases for {len(summary.remapped)} day(s) once their "
+            "parent app appeared in later reports."
+        )
     if summary.unmapped_rows:
         env.warn(f"{summary.unmapped_rows} report rows matched no known app and were skipped.")
+    if summary.unmapped_child_rows:
+        env.warn(
+            f"{summary.unmapped_child_rows} in-app purchase rows belong to an app Storepulse "
+            "hasn't seen yet. Re-run this backfill after the app has a download in the "
+            "range (or once the key can list apps) to pick them up."
+        )
     for day, message in summary.errors:
         env.warn(f"{day}: {message}")
     return 1 if summary.errors else 0

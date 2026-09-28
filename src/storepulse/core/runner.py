@@ -48,6 +48,8 @@ class RunSummary:
     errors: list[tuple[date, str]] = field(default_factory=list)
     unknown_types: Counter[str] = field(default_factory=Counter)
     unmapped_rows: int = 0
+    unmapped_child_rows: int = 0  # IAP rows whose parent app is still unknown
+    remapped: list[date] = field(default_factory=list)
     new_apps: list[str] = field(default_factory=list)
 
 
@@ -70,6 +72,9 @@ def collect_apple_sales(
     sleep = sleep or time.sleep
     source = apple_sales.SOURCE
     summary = RunSummary()
+    # Days whose IAP rows couldn't be mapped because the parent app's SKU wasn't known
+    # yet (no discovery). Re-mapped at the end once later days have taught the SKU.
+    pending: dict[date, tuple[list[apple_sales.SalesRow], int]] = {}
     for i, day in enumerate(dates):
         if i and delay:
             sleep(delay)
@@ -81,6 +86,8 @@ def collect_apple_sales(
                 report = apple_sales.parse_summary(apple_sales.decode_report(fetched.content))
                 mapped = apple_sales.map_rows(conn, day, report)
                 written = db.replace_source_day(conn, source, iso, mapped.rows)
+                if mapped.unmapped_child_rows:
+                    pending[day] = (report, mapped.unmapped_rows)
                 note = mapped.note()
                 for code, count in sorted(mapped.unknown_types.items()):
                     log.warning(
@@ -173,4 +180,39 @@ def collect_apple_sales(
             outcome = "error"
         if progress:
             progress(day, outcome)
+    _remap_pending(conn, pending, summary, progress)
     return summary
+
+
+def _remap_pending(
+    conn: sqlite3.Connection,
+    pending: dict[date, tuple[list[apple_sales.SalesRow], int]],
+    summary: RunSummary,
+    progress: Callable[[date, str], None] | None,
+) -> None:
+    """Re-map days whose child rows (IAPs) had no known parent SKU, now that later days in
+    this run may have registered it. What stays unmapped is counted for the warning."""
+    source = apple_sales.SOURCE
+    for day, (report, unmapped_before) in sorted(pending.items()):
+        mapped = apple_sales.map_rows(conn, day, report)
+        if mapped.unmapped_rows >= unmapped_before:
+            summary.unmapped_child_rows += mapped.unmapped_child_rows
+            continue
+        iso = day.isoformat()
+        started = db.utc_now()
+        written = db.replace_source_day(conn, source, iso, mapped.rows)
+        summary.unmapped_rows -= unmapped_before - mapped.unmapped_rows
+        summary.unmapped_child_rows += mapped.unmapped_child_rows
+        summary.remapped.append(day)
+        db.log_ingest(
+            conn,
+            source=source,
+            report_date=iso,
+            started_at=started,
+            status="ok",
+            rows=written,
+            note="re-mapped after later days registered the parent app"
+            + (f"; {mapped.note()}" if mapped.note() else ""),
+        )
+        if progress:
+            progress(day, f"re-mapped in-app purchases, {written} rows")
