@@ -329,6 +329,32 @@ def test_vitals_line_omitted_when_under_threshold(
     assert "Vitals" not in result.text
 
 
+def test_html_vitals_shown_when_only_one_rate_is_present(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """Crash and ANR are queried as two separate Play Reporting API metric sets, and
+    Google omits a metric set's row when there's insufficient user population for
+    statistical confidence — so one can be present while the other is absent. The HTML
+    per-app vitals line must still show whichever data exists, not disappear entirely
+    because crash_rate_28d specifically is the one that's missing.
+    """
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
+    db.replace_source_range(
+        conn,
+        "play_vitals",
+        AS_OF.isoformat(),
+        AS_OF.isoformat(),
+        # No crash_rate/crash_rate_28d rows at all this day, only anr_rate_28d.
+        [db.MetricRow(AS_OF.isoformat(), android_id, "ALL", "anr_rate_28d", "", 0.001)],
+        app_ids=[android_id],
+    )
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "crash 0.0% daily, 0.0% 28d &middot; anr 0.0% daily, 0.1% 28d" in result.html
+
+
 # -- overdue cadence rules -----------------------------------------------------------------
 
 

@@ -588,13 +588,21 @@ def _render_html(ctx: _Context) -> str:
             else "no proceeds"
         )
         vitals_text = ""
-        if row.platform == "android" and row.crash_rate_28d is not None:
+        # Either rate can independently be missing: Google's Reporting API omits a
+        # metric set's row when there's insufficient user population for statistical
+        # confidence, and crash/ANR are queried as two separate metric sets. Gating on
+        # crash_rate_28d alone would hide real, valid ANR data on a day crash_rate_28d
+        # is absent (or vice versa).
+        if row.platform == "android" and (
+            row.crash_rate_28d is not None or row.anr_rate_28d is not None
+        ):
             crash_daily = (row.crash_rate or 0) * 100
+            crash_28d = (row.crash_rate_28d or 0) * 100
             anr_daily = (row.anr_rate or 0) * 100
             anr_28d = (row.anr_rate_28d or 0) * 100
             vitals_text = (
                 '<div style="color:#666;font-size:12px;">'
-                f"crash {crash_daily:.1f}% daily, {row.crash_rate_28d * 100:.1f}% 28d "
+                f"crash {crash_daily:.1f}% daily, {crash_28d:.1f}% 28d "
                 f"&middot; anr {anr_daily:.1f}% daily, {anr_28d:.1f}% 28d</div>"
             )
         rows_html.append(
