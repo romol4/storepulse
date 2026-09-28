@@ -72,6 +72,7 @@ storepulse/
   core/
     sources/apple_sales.py  apple_analytics.py  play_reports.py  play_vitals.py  revenuecat.py
     discovery.py      list apps from each credential
+    config.py         non-secret settings (config.toml) and local paths
     db.py             schema, migrations, upserts
     secrets.py        SecretStore interface: KeyringStore, EncryptedFileStore, DbEncryptedStore
     digest.py         builds the email (HTML + plain text)
@@ -102,7 +103,10 @@ Four sources, each behind its own module in `core/sources/`. Each is optional: a
 
 - Create an API key in App Store Connect (Users and Access → Integrations) with the Sales and Reports role, plus App Manager or Admin if the analytics report requests must be created by the collector. Store the `.p8`, key ID, issuer ID, and vendor number.
 - Sign a JWT per run: header `alg: ES256`, `kid: <key id>`; payload `iss: <issuer id>`, `aud: appstoreconnect-v1`, `exp` ≤ 20 minutes out.
-- **Sales:** `GET /v1/salesReports` with `filter[frequency]=DAILY`, `filter[reportType]=SALES`, `filter[reportSubType]=SUMMARY`, `filter[vendorNumber]`, `filter[reportDate]=YYYY-MM-DD`. Response is a gzipped TSV. Map rows to apps by Apple Identifier; split by Product Type Identifier into first-time downloads, redownloads, updates, and in-app purchases. A 404 for a date means "not available yet", not an error.
+- **Sales:** `GET /v1/salesReports` with `filter[frequency]=DAILY`, `filter[reportType]=SALES`, `filter[reportSubType]=SUMMARY`, `filter[vendorNumber]`, `filter[reportDate]=YYYY-MM-DD`. Response is a gzipped TSV. Map app rows to apps by Apple Identifier and in-app purchase rows by Parent Identifier (the parent app's SKU, kept in `kv` as `apple_sku:<sku>`); split by Product Type Identifier into first-time downloads (`installs`), redownloads, and in-app purchases (`iap_units`). Update rows and `IA3` (restored in-app purchase) rows add no unit metric. An empty Country Code is stored as `ZZ`, never `ALL`. When a day's in-app purchase rows arrive before their parent app is known, they are re-mapped at the end of the run, once a later day has registered the parent. Unrecognized product types are logged and counted; their proceeds still count. Apps seen in app rows but not in discovery are added automatically; IAP rows never add apps.
+  - **404s:** a 404 whose detail says there were no sales is stored as a zero-sales day (clears that day's rows). "Not available yet" is `not_ready`. Any other 404 is `not_ready` for dates up to 2 days old and inferred no-sales for older dates; an inferred no-sales day never deletes stored rows (it logs a warning instead).
+  - **Retention:** Apple keeps daily reports for about a year, so backfills are clamped to the last 365 days (Pacific time); earlier dates are skipped with a warning and never recorded.
+  - **Auth:** the JWT is re-signed after 15 minutes so long backfills never run on an expired token.
 - **Subscriptions:** same endpoint with `reportType=SUBSCRIPTION` / `SUBSCRIPTION_EVENT` for apps with subscriptions.
 - **Analytics:** one-time setup per app: `POST /v1/analyticsReportRequests` with `accessType: ONGOING`. Daily: list the request's reports, pick the needed ones (downloads, discovery and engagement), fetch `DAILY` instances, download segment files (gzipped CSV). Store the request IDs in the DB so setup never repeats.
 
@@ -164,7 +168,7 @@ CREATE TABLE ingest_log (
   rows INTEGER, error TEXT
 );
 
-CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, schema version
+CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, Apple SKU map, schema version
 ```
 
 **Metric vocabulary** (fixed list in `db.py`; unknown metrics are rejected):
@@ -185,7 +189,8 @@ CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, s
 - Every write is `INSERT … ON CONFLICT DO UPDATE`, so re-pulls overwrite and never duplicate.
 - A re-pull for one source and date replaces that source's rows for that date inside one transaction (delete, then insert) so countries that dropped to zero don't linger.
 - Money is stored in the original currency; conversion happens at render time (see Open decisions).
-- `country = 'ALL'` rows are written only where the source gives a total; otherwise the renderer sums countries.
+- `country = 'ALL'` rows are written only where the source gives a total; otherwise the renderer sums countries. `apple_sales` writes no `ALL` rows, so readers sum its countries. Unknown countries are `ZZ`, never `ALL`.
+- A row belongs to the source that wrote it. Another source writing the same key fails loudly and changes nothing; it never takes the row over.
 
 **Hosted-mode additions**
 
@@ -227,7 +232,7 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 
 - Sources run independently: one failing source never blocks the others or the digest.
 - "Report not available yet" is logged as `not_ready`, not `error`, and is retried by tomorrow's window.
-- HTTP 429 and 5xx retry with exponential backoff (3 attempts); auth errors fail fast with a message that says which credential and which permission to check.
+- HTTP 429 and 5xx retry with exponential backoff (3 attempts); auth errors fail fast with a message that says which credential and which permission to check. The message always includes the store's own reason. Apple's `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED` means the Account Holder must accept an updated agreement; it is not a key-role problem.
 - A new Google service account can take up to a day or two before Play permissions take effect; `doctor` detects this and says so instead of reporting a generic 403.
 - Raw downloaded files are cached for 30 days so parsers can be fixed and re-run without re-downloading.
 - A lock prevents overlapping runs.
@@ -306,6 +311,13 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
 3. **Email digest + scheduler → release v0.1 (local)**
    - SMTP mailer, HTML + text digest with inline PNG charts, thresholds, `schedule install` for Linux, macOS, and Windows.
    - *Done when:* a fresh machine goes from `pipx install` to a received digest in under 15 minutes following the README; published to PyPI.
+
+**3b. Apple subscription reports** (added after Phase 3, so the later phase numbers stay the same)
+- Daily `SALES/SUBSCRIPTION` and `SUBSCRIPTION_EVENT` reports from `GET /v1/salesReports`. Metrics for active subscriptions, trials and churn events are added to the vocabulary in this phase.
+- Until then, auto-renewable subscription revenue still arrives through `IAY` rows in the daily SALES report; only the subscription state (active, trial, churn) is missing.
+- Overlaps with the open "Revenue source" decision: if RevenueCat is chosen, this phase is limited to what RevenueCat doesn't cover.
+- *Done when:* active subscriptions and trials match App Store Connect's Subscriptions dashboard for three sample days, and re-runs don't change row counts.
+
 4. **Hosted shell → release v0.2 (hosted)**
    - FastAPI app, admin account + TOTP, setup token, `DbEncryptedStore`, web setup flow, dashboard pages, in-process scheduler, Dockerfile, compose file, Caddy example.
    - *Done when:* `docker compose up` to working dashboard and email in under 15 minutes; secrets are unreadable in the DB without the master key; image published to GHCR.
