@@ -175,12 +175,41 @@ def _converted_total(proceeds: dict[str, float], digest_cfg: config.DigestConfig
 # -- queries -----------------------------------------------------------------------------
 
 
-def _platform_as_of(conn: sqlite3.Connection, source: str) -> date | None:
+def _latest_data_day(conn: sqlite3.Connection, source: str) -> str | None:
     row = conn.execute(
         "SELECT MAX(date) AS d FROM daily_metrics WHERE source = ?", (source,)
     ).fetchone()
-    value = row["d"]
-    return date.fromisoformat(value) if value else None
+    return str(row["d"]) if row["d"] else None
+
+
+def _platform_as_of(conn: sqlite3.Connection, source: str) -> date | None:
+    """The latest day this source has genuinely finished collecting.
+
+    For a daily source (apple_sales), this is the later of daily_metrics' latest day
+    and ingest_log's latest 'ok' report_date, not just one or the other:
+    - ingest_log can be ahead of daily_metrics: a true zero-sales day writes no
+      daily_metrics rows at all even though the report was collected successfully
+      (docs/SPEC.md, Apple 404s), so daily_metrics' MAX(date) alone would understate
+      freshness for a low-volume app.
+    - daily_metrics can be ahead of ingest_log: a later re-attempt for an
+      already-collected day can log a fresh 'error' row (a transient fetch failure)
+      without touching that day's still-good data, so ingest_log's latest-'ok' alone
+      would make already-collected data look like it was never collected.
+    Monthly sources' ingest_log report_date is just the month's first day, not a real
+    day, so those read only daily_metrics, which has one row per actual day in the file.
+    """
+    candidates = []
+    data_day = _latest_data_day(conn, source)
+    if data_day is not None:
+        candidates.append(data_day)
+    if _SOURCE_CADENCE.get(source) == "daily":
+        row = conn.execute(
+            "SELECT MAX(report_date) AS d FROM ingest_log WHERE source = ? AND status = 'ok'",
+            (source,),
+        ).fetchone()
+        if row["d"] is not None:
+            candidates.append(str(row["d"]))
+    return date.fromisoformat(max(candidates)) if candidates else None
 
 
 def compute_as_of(conn: sqlite3.Connection, cfg: config.Config) -> date | None:
@@ -297,9 +326,7 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
     return float(row["value"]) if row is not None else None
 
 
-def _build_app_rows(
-    conn: sqlite3.Connection, as_of: date, window: Window, prev_window: Window
-) -> list[AppRow]:
+def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> list[AppRow]:
     apps = conn.execute("SELECT id, name, platform FROM apps ORDER BY name").fetchall()
     rows: list[AppRow] = []
     for record in apps:
@@ -366,12 +393,30 @@ def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[st
 
 def _source_note(
     conn: sqlite3.Connection, source: str, as_of: date
-) -> tuple[str, str | None, str | None]:
-    """(state, latest_ok_date, latest_not_ready_date). state is the *last attempt's* status."""
-    latest = conn.execute(
-        "SELECT status FROM ingest_log WHERE source = ? ORDER BY started_at DESC LIMIT 1", (source,)
+) -> tuple[bool, str | None, str | None]:
+    """(has_unresolved_error, latest_ok_date, latest_not_ready_date).
+
+    has_unresolved_error is true if *any* report_date's most recent attempt for this
+    source is an error — not just whichever ingest_log row happens to have the latest
+    started_at overall. started_at has only 1-second resolution, so on a fast run
+    (e.g. backfill) it cannot reliably order same-second attempts; id (the insertion
+    order) can. Using only the single globally-latest row also let a later report_date
+    succeeding hide an earlier one's unresolved error (or, for Play sources that log one
+    row per app/period, a different app's) — the spec requires any error to surface.
+    """
+    has_error = conn.execute(
+        """
+        SELECT 1 FROM ingest_log a
+        WHERE a.source = ? AND a.status = 'error'
+        AND a.id = (
+            SELECT b.id FROM ingest_log b
+            WHERE b.source = a.source AND b.report_date = a.report_date
+            ORDER BY b.id DESC LIMIT 1
+        )
+        LIMIT 1
+        """,
+        (source,),
     ).fetchone()
-    state = str(latest["status"]) if latest is not None else "not_ready"
     ok_row = conn.execute(
         "SELECT MAX(report_date) AS d FROM ingest_log WHERE source = ? AND status = 'ok'", (source,)
     ).fetchone()
@@ -379,7 +424,7 @@ def _source_note(
         "SELECT MAX(report_date) AS d FROM ingest_log WHERE source = ? AND status = 'not_ready'",
         (source,),
     ).fetchone()
-    return state, ok_row["d"], not_ready_row["d"]
+    return has_error is not None, ok_row["d"], not_ready_row["d"]
 
 
 def _is_overdue(source: str, latest_ok: str | None, today: date, stale_days: int) -> bool:
@@ -399,16 +444,23 @@ def _source_status_text(
     conn: sqlite3.Connection, source: str, today: date, as_of: date, stale_days: int
 ) -> str:
     label = _SOURCE_LABELS[source]
-    last_attempt_state, latest_ok, latest_not_ready = _source_note(conn, source, as_of)
-    if last_attempt_state == "error":
+    has_error, latest_ok, latest_not_ready = _source_note(conn, source, as_of)
+    if has_error:
         return f"{label} error"
     if _is_overdue(source, latest_ok, today, stale_days):
         return f"{label} not_ready"
     note = ""
     if latest_not_ready is not None and (latest_ok is None or latest_not_ready > latest_ok):
         note = f" ({_short_date(date.fromisoformat(latest_not_ready))} not ready)"
-    elif latest_ok is not None and latest_ok != as_of.isoformat():
-        note = f" ({_short_date(date.fromisoformat(latest_ok))})"
+    else:
+        display_date = latest_ok
+        if _SOURCE_CADENCE[source] != "daily":
+            # ingest_log.report_date for a monthly/earnings source is that month's
+            # first day, not a real day of data — show the latest day the file
+            # actually covers instead (e.g. "play_installs ok (Sep 22)", not "(Sep 1)").
+            display_date = _latest_data_day(conn, source) or latest_ok
+        if display_date is not None and display_date != as_of.isoformat():
+            note = f" ({_short_date(date.fromisoformat(display_date))})"
     return f"{label} ok{note}"
 
 
@@ -539,12 +591,17 @@ def _render_html(ctx: _Context) -> str:
             f"earnings arrive): {amounts}</p>"
         )
 
-    proceeds_parts = _proceeds_parts(ctx.proceeds, ctx.prev_proceeds)
-    converted = _converted_total(ctx.proceeds, ctx.cfg.digest)
-    converted_html = ""
-    if converted is not None:
-        converted_html = (
-            f" {_APPROX} {_format_money(ctx.cfg.digest.display_currency, converted)} converted"
+    proceeds_html = ""
+    if ctx.proceeds:
+        proceeds_parts = _proceeds_parts(ctx.proceeds, ctx.prev_proceeds)
+        converted = _converted_total(ctx.proceeds, ctx.cfg.digest)
+        converted_html = ""
+        if converted is not None:
+            converted_html = (
+                f" {_APPROX} {_format_money(ctx.cfg.digest.display_currency, converted)} converted"
+            )
+        proceeds_html = (
+            f'<p style="margin:4px 0;">Proceeds: {", ".join(proceeds_parts)}{converted_html}</p>'
         )
 
     top_app_html = ""
@@ -554,13 +611,12 @@ def _render_html(ctx: _Context) -> str:
             f"{ctx.top_app.installs:.0f} installs</p>"
         )
 
-    proceeds_html = ", ".join(proceeds_parts) or "&mdash;"
     return (
         '<div style="font-family:sans-serif;color:#111;max-width:600px;">'
         f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.as_of)}</h2>'
         f'<p style="font-size:18px;margin:4px 0;">Installs: {combined:.0f}'
         f"{_trend_suffix(combined, prev_combined)}{breakdown}</p>"
-        f'<p style="margin:4px 0;">Proceeds: {proceeds_html}{converted_html}</p>'
+        f"{proceeds_html}"
         f"{sales_gross_html}{top_app_html}{warnings_html}"
         f'<p style="color:#666;">Data: {ctx.data_line or "&mdash;"}</p>'
         f'<table style="border-collapse:collapse;width:100%;">{"".join(rows_html)}</table>'
@@ -596,7 +652,7 @@ def build_digest(
         window.start - timedelta(days=_WINDOW_DAYS), window.start - timedelta(days=1)
     )
 
-    app_rows = _build_app_rows(conn, as_of, window, prev_window)
+    app_rows = _build_app_rows(conn, as_of, window)
     ctx = _Context(
         as_of=as_of,
         cfg=cfg,

@@ -94,6 +94,31 @@ def test_as_of_ignores_unconfigured_platforms(
     assert digest.compute_as_of(conn, _cfg(google=None)) == date(2026, 9, 26)
 
 
+def test_as_of_recognizes_a_real_zero_sales_day(conn: sqlite3.Connection, ios_id: int) -> None:
+    """A genuine zero-installs, zero-proceeds day writes no daily_metrics rows at all
+    (there's nothing to store), even though the report was collected successfully — so
+    as-of must still advance to it via ingest_log, not understate freshness by reading
+    daily_metrics alone (review nit #7).
+    """
+    _apple_day(conn, "2026-09-25", ios_id, installs=3, proceeds=1)
+    _log(conn, "apple_sales", "2026-09-25")
+    _log(conn, "apple_sales", "2026-09-26", status="ok")  # zero-sales day: no daily_metrics row
+    assert digest.compute_as_of(conn, _cfg(google=None)) == date(2026, 9, 26)
+
+
+def test_as_of_keeps_older_data_fresh_after_a_later_retry_errors(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    """A later re-attempt for an already-collected day can log a fresh 'error' without
+    touching that day's still-good data; as-of must still reflect the real data, not
+    fall back to an earlier, staler ingest_log 'ok' date (review nit #7).
+    """
+    _apple_day(conn, "2026-09-26", ios_id, installs=3, proceeds=1)
+    _log(conn, "apple_sales", "2026-09-26")
+    _log(conn, "apple_sales", "2026-09-26", status="error")  # same-day retry fails later
+    assert digest.compute_as_of(conn, _cfg(google=None)) == date(2026, 9, 26)
+
+
 def test_no_data_yet_returns_placeholder_digest(conn: sqlite3.Connection) -> None:
     result = digest.build_digest(conn, _cfg(), today=TODAY)
     assert result.as_of is None
@@ -342,9 +367,46 @@ def test_monthly_source_overdue_after_day_4(conn: sqlite3.Connection, android_id
     assert "play_installs not_ready" in result.text
 
 
+def test_monthly_source_lag_note_shows_latest_real_data_day(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The Data line's lag note for a monthly source must show the latest day its file
+    actually has data for, not ingest_log's report_date (always that month's 1st day for
+    a monthly source, never a real day of data) (review nit #6).
+    """
+    _apple_day(conn, "2026-09-18", ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", "2026-09-18")  # limits as-of to Sep 18
+    _android_installs_day(conn, "2026-09-22", android_id, installs=1)
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=date(2026, 9, 20))
+    assert "play_installs ok (Sep 22)" in result.text
+    assert "(Sep 1)" not in result.text
+
+
 def test_error_status_reported(conn: sqlite3.Connection, ios_id: int) -> None:
     _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
     _log(conn, "apple_sales", AS_OF.isoformat(), status="error")
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_sales error" in result.text
+
+
+def test_mid_window_error_is_not_hidden_by_a_later_success(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    """An error partway through the window must still surface even though every later
+    day (including as-of) succeeded. Picking only the single ingest_log row with the
+    globally-latest started_at let a later 'ok' entry hide an earlier 'error' one for a
+    different report_date; started_at also only has 1-second resolution, so a fast test
+    or backfill run can log same-second rows in either order (review finding #2).
+    """
+    days = [(AS_OF - timedelta(days=i)).isoformat() for i in reversed(range(7))]  # oldest first
+    for d in days:
+        _apple_day(conn, d, ios_id, installs=1, proceeds=0)
+    error_day = days[2]  # partway through the window, well before as-of
+    _log(conn, "apple_sales", error_day, status="error")
+    for d in days:
+        if d != error_day:
+            _log(conn, "apple_sales", d)  # logged 'ok' after the error, like later days would be
     result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
     assert "apple_sales error" in result.text
 
@@ -483,7 +545,7 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
         "Android sales (gross, provisional, until the month's earnings arrive)  $25.00\n"
         "Top app   deskFT 70 installs\n"
         "Vitals    billFT Android crash rate 2.0% ⚠\n"
-        "Data      apple_sales ok · play_installs ok (Sep 1) · vitals ok\n"
+        "Data      apple_sales ok · play_installs ok · vitals ok\n"
         "\n"
         "Apps\n"
         "  deskFT (iOS): 70 installs, $105.00\n"

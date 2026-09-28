@@ -29,6 +29,7 @@ from storepulse.core.secrets import (
     PASSPHRASE_FILE_ENV,
     SECRETS_FILENAME,
     STORE_FILE,
+    STORE_KEYRING,
     EncryptedFileStore,
     SecretStoreError,
 )
@@ -82,7 +83,10 @@ def passphrase_file_path() -> Path:
 
 
 def systemd_service_unit(passphrase_file: Path | None) -> str:
-    env_line = f"Environment={PASSPHRASE_FILE_ENV}={passphrase_file}\n" if passphrase_file else ""
+    # Quoted per systemd.service(5): an unquoted Environment= value containing a space
+    # (e.g. a config dir under a "Documents and Settings"-style home) would otherwise
+    # be split into multiple assignments.
+    env_line = f'Environment="{PASSPHRASE_FILE_ENV}={passphrase_file}"\n' if passphrase_file else ""
     return (
         "[Unit]\n"
         "Description=Storepulse daily digest\n"
@@ -159,7 +163,8 @@ def schtasks_delete_args() -> list[str]:
 
 def crontab_line(run_time: str, passphrase_file: Path | None) -> str:
     hour, minute = run_time.split(":")
-    env_prefix = f"{PASSPHRASE_FILE_ENV}={passphrase_file} " if passphrase_file else ""
+    # Quoted so cron's shell doesn't split the assignment on a space in the path.
+    env_prefix = f'{PASSPHRASE_FILE_ENV}="{passphrase_file}" ' if passphrase_file else ""
     return (
         f"{int(minute)} {int(hour)} * * * {env_prefix}"
         f'"{sys.executable}" -m storepulse run {CRONTAB_MARKER}'
@@ -184,7 +189,9 @@ def _write_passphrase_file(env: Env, cfg: config.Config) -> Path | None:
     path = config.config_dir() / SECRETS_FILENAME
     probe_name = APPLE_P8_SECRET if cfg.apple is not None else GOOGLE_SA_SECRET
     try:
-        if EncryptedFileStore(path, passphrase).get(probe_name) is None:
+        # ignore_env=True: verify exactly the passphrase just typed, not one from a
+        # stale STOREPULSE_PASSPHRASE(_FILE) left in this process's environment.
+        if EncryptedFileStore(path, passphrase, ignore_env=True).get(probe_name) is None:
             raise CliError("that passphrase opened the file, but the saved key is missing")
     except SecretStoreError as exc:
         raise CliError(str(exc)) from None
@@ -231,8 +238,18 @@ def _install_systemd(
     unit_dir.mkdir(parents=True, exist_ok=True)
     (unit_dir / f"{SERVICE_NAME}.service").write_text(systemd_service_unit(passphrase_file))
     (unit_dir / f"{SERVICE_NAME}.timer").write_text(systemd_timer_unit(run_time))
-    runner(["systemctl", "--user", "daemon-reload"])
-    runner(["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.timer"])
+    reload_result = runner(["systemctl", "--user", "daemon-reload"])
+    if not reload_result.ok:
+        raise CliError(
+            "systemctl daemon-reload failed: "
+            f"{(reload_result.stderr or reload_result.stdout).strip()}"
+        )
+    enable_result = runner(["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.timer"])
+    if not enable_result.ok:
+        raise CliError(
+            "systemctl enable --now failed: "
+            f"{(enable_result.stderr or enable_result.stdout).strip()}"
+        )
     env.say(f"systemd user timer installed: {unit_dir / f'{SERVICE_NAME}.timer'}")
 
     user = _current_user()
@@ -263,12 +280,25 @@ def _remove_systemd(env: Env, runner: CommandRunner) -> None:
 
 
 def _install_crontab(
-    env: Env, runner: CommandRunner, run_time: str, passphrase_file: Path | None
+    env: Env,
+    runner: CommandRunner,
+    run_time: str,
+    passphrase_file: Path | None,
+    secret_store: str,
 ) -> None:
+    if secret_store == STORE_KEYRING:
+        env.warn(
+            "no systemd user session available, falling back to crontab; cron jobs "
+            "usually run without a desktop keychain session, so the OS-keychain secrets "
+            "this was set up with may be unreachable when the job runs (README, "
+            "'Schedule management')."
+        )
     existing = runner(["crontab", "-l"])
     lines = [line for line in existing.stdout.splitlines() if CRONTAB_MARKER not in line]
     lines.append(crontab_line(run_time, passphrase_file))
-    _write_crontab(runner, lines)
+    result = _write_crontab(runner, lines)
+    if not result.ok:
+        raise CliError(f"crontab install failed: {(result.stderr or result.stdout).strip()}")
     env.say("Installed a crontab entry (no systemd available).")
 
 
@@ -279,13 +309,13 @@ def _remove_crontab(env: Env, runner: CommandRunner) -> None:
     env.say("Crontab entry removed.")
 
 
-def _write_crontab(runner: CommandRunner, lines: list[str]) -> None:
+def _write_crontab(runner: CommandRunner, lines: list[str]) -> CommandResult:
     path = config.config_dir() / "crontab.tmp"
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(lines)
     path.write_text(content + "\n" if content else "")
     try:
-        runner(["crontab", str(path)])
+        return runner(["crontab", str(path)])
     finally:
         path.unlink(missing_ok=True)
 
@@ -312,8 +342,12 @@ def _install_launchd(
     path = launchd_plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(launchd_plist(run_time, passphrase_file))
+    # bootout is expected to fail with nothing to unload on a first install; only
+    # bootstrap (the call that actually loads the agent) is checked.
     runner(["launchctl", "bootout", f"gui/{_uid()}", str(path)])
-    runner(["launchctl", "bootstrap", f"gui/{_uid()}", str(path)])
+    result = runner(["launchctl", "bootstrap", f"gui/{_uid()}", str(path)])
+    if not result.ok:
+        raise CliError(f"launchctl bootstrap failed: {(result.stderr or result.stdout).strip()}")
     env.say(f"launchd agent installed: {path}")
 
 
@@ -377,7 +411,7 @@ def cmd_schedule_install(args: argparse.Namespace, env: Env) -> int:
     elif _systemd_available(runner):
         _install_systemd(env, runner, run_time, passphrase_file)
     else:
-        _install_crontab(env, runner, run_time, passphrase_file)
+        _install_crontab(env, runner, run_time, passphrase_file, cfg.secret_store)
 
     cfg.schedule = dataclasses.replace(cfg.schedule, run_time=run_time)
     config.save(cfg)

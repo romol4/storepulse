@@ -273,10 +273,13 @@ class EncryptedFileStore:
         path: Path,
         passphrase: Callable[[], str] | str | None = None,
         reason: str = "",
+        *,
+        ignore_env: bool = False,
     ) -> None:
         self.path = path
         self._passphrase_source = passphrase
         self._reason = reason
+        self._ignore_env = ignore_env
         self._key: bytes | None = None
 
     # -- file handling -------------------------------------------------------------
@@ -317,9 +320,15 @@ class EncryptedFileStore:
         # Direct value first, then the file (for scheduled runs, which can't prompt),
         # then the interactive callback; callers pass only their interactive prompt and
         # never read either variable themselves.
+        #
+        # ignore_env skips both env sources so a caller verifying one specific,
+        # freshly-typed passphrase (cli/schedule.py, writing the passphrase file) can't
+        # have that check silently pass — or fail — using a *different* passphrase from
+        # a stale STOREPULSE_PASSPHRASE or STOREPULSE_PASSPHRASE_FILE left in the
+        # environment (e.g. from a previous `schedule install`).
         source = self._passphrase_source
-        value = os.environ.get(PASSPHRASE_ENV, "")
-        if not value:
+        value = "" if self._ignore_env else os.environ.get(PASSPHRASE_ENV, "")
+        if not value and not self._ignore_env:
             value = self._read_passphrase_file()
         if not value and callable(source):
             value = source()

@@ -27,26 +27,37 @@ def cmd_run(args: argparse.Namespace, env: Env) -> int:
         raise CliError("nothing is set up yet; run `storepulse init` first")
     store = store_for_run(env, cfg)
 
+    # A setup problem with one platform (a deleted keychain entry, a corrupt saved
+    # credential) must not stop the other from running, same as a live API error during
+    # collection doesn't (docs/SPEC.md, "one failing source never blocks the others").
+    setup_errors: list[str] = []
+
     apple: AppleClient | None = None
     if cfg.apple is not None:
         p8 = store.get(APPLE_P8_SECRET)
         if p8 is None:
-            raise CliError(f"no Apple key found in {store.describe()}; run `storepulse init` again")
-        apple = apple_client(env, cfg.apple, p8)
+            setup_errors.append(
+                f"apple_sales: no Apple key found in {store.describe()}; "
+                "run `storepulse init` again"
+            )
+        else:
+            apple = apple_client(env, cfg.apple, p8)
 
     google: GoogleClient | None = None
     if cfg.google is not None:
         raw = store.get(GOOGLE_SA_SECRET)
         if raw is None:
-            raise CliError(
-                f"no Google service account found in {store.describe()}; "
+            setup_errors.append(
+                f"google_auth: no Google service account found in {store.describe()}; "
                 "run `storepulse init` again"
             )
-        try:
-            sa = load_service_account(raw)
-        except GoogleCredentialError as exc:
-            raise CliError(str(exc)) from None
-        google = google_client(env, sa)
+        else:
+            try:
+                sa = load_service_account(raw)
+            except GoogleCredentialError as exc:
+                setup_errors.append(f"google_auth: {exc}")
+            else:
+                google = google_client(env, sa)
 
     smtp_password = store.get(SMTP_PASSWORD_SECRET) if cfg.email is not None else None
 
@@ -74,6 +85,8 @@ def cmd_run(args: argparse.Namespace, env: Env) -> int:
             )
     finally:
         conn.close()
+
+    result.errors = setup_errors + result.errors
 
     if result.errors:
         env.warn(f"{len(result.errors)} source(s) had problems:")

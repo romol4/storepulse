@@ -15,6 +15,8 @@ Play data into a local SQLite database. It works in two modes:
 >
 > Not built yet:
 > - The hosted web dashboard (Phase 4+).
+> - `storepulse status`, a weekly summary email, an optional CSV attachment on the
+>   digest, and a 30-day cache of raw downloaded report files.
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 

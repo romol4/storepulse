@@ -10,7 +10,7 @@ import pytest
 from storepulse.cli import schedule
 from storepulse.cli.common import APPLE_P8_SECRET, CommandResult, Env
 from storepulse.core import config
-from storepulse.core.secrets import SECRETS_FILENAME, EncryptedFileStore
+from storepulse.core.secrets import PASSPHRASE_ENV, SECRETS_FILENAME, EncryptedFileStore
 
 
 @dataclass
@@ -40,6 +40,10 @@ def _env(
 
 def _out(env: Env) -> str:
     return env.stdout.getvalue()  # type: ignore[attr-defined, no-any-return]
+
+
+def _err(env: Env) -> str:
+    return env.stderr.getvalue()  # type: ignore[attr-defined, no-any-return]
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +76,7 @@ def test_systemd_service_unit_without_passphrase_file() -> None:
 def test_systemd_service_unit_with_passphrase_file(tmp_path: Path) -> None:
     path = tmp_path / "run-passphrase"
     unit = schedule.systemd_service_unit(path)
-    assert f"Environment=STOREPULSE_PASSPHRASE_FILE={path}" in unit
+    assert f'Environment="STOREPULSE_PASSPHRASE_FILE={path}"' in unit
 
 
 def test_systemd_timer_unit_format() -> None:
@@ -119,7 +123,7 @@ def test_crontab_line_format() -> None:
 def test_crontab_line_with_passphrase_file(tmp_path: Path) -> None:
     path = tmp_path / "run-passphrase"
     line = schedule.crontab_line("09:05", path)
-    assert f"STOREPULSE_PASSPHRASE_FILE={path} " in line
+    assert f'STOREPULSE_PASSPHRASE_FILE="{path}" ' in line
 
 
 # -- install: per-OS dispatch -------------------------------------------------------------
@@ -207,6 +211,84 @@ def test_install_linux_falls_back_to_crontab_without_systemd(
     crontab_write_calls = [c for c in runner.calls if c[0] == "crontab" and c[1] != "-l"]
     assert len(crontab_write_calls) == 1
     assert not (schedule.systemd_dir() / "storepulse.timer").exists()
+
+
+def test_install_linux_systemd_daemon_reload_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    config.save(_cfg())
+    runner = FakeRunner(
+        responses={
+            ("systemctl", "--user", "--version"): CommandResult(0, "255", ""),
+            ("systemctl", "--user", "daemon-reload"): CommandResult(1, "", "dbus unreachable"),
+        }
+    )
+    from storepulse.cli.common import CliError
+
+    with pytest.raises(CliError, match="dbus unreachable"):
+        schedule.cmd_schedule_install(_ns("08:00"), _env(runner))
+
+
+def test_install_linux_systemd_enable_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    config.save(_cfg())
+    runner = FakeRunner(
+        responses={
+            ("systemctl", "--user", "--version"): CommandResult(0, "255", ""),
+            ("systemctl", "--user", "enable", "--now", "storepulse.timer"): CommandResult(
+                1, "", "unit not found"
+            ),
+        }
+    )
+    from storepulse.cli.common import CliError
+
+    with pytest.raises(CliError, match="unit not found"):
+        schedule.cmd_schedule_install(_ns("08:00"), _env(runner))
+
+
+def test_install_linux_crontab_write_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    config.save(_cfg())
+    crontab_tmp = config.config_dir() / "crontab.tmp"
+    runner = FakeRunner(
+        responses={
+            ("systemctl", "--user", "--version"): CommandResult(1, "", "not found"),
+            ("crontab", str(crontab_tmp)): CommandResult(1, "", "no crontab support"),
+        }
+    )
+    from storepulse.cli.common import CliError
+
+    with pytest.raises(CliError, match="no crontab support"):
+        schedule.cmd_schedule_install(_ns("08:00"), _env(runner))
+
+
+def test_install_linux_crontab_with_keyring_store_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    config.save(_cfg(secret_store="keyring"))
+    runner = FakeRunner(
+        responses={("systemctl", "--user", "--version"): CommandResult(1, "", "not found")}
+    )
+    env = _env(runner)
+    assert schedule.cmd_schedule_install(_ns("08:00"), env) == 0
+    assert "keychain session" in _err(env)
+
+
+def test_install_darwin_bootstrap_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(schedule, "_uid", lambda: 501)
+    config.save(_cfg())
+    runner = FakeRunner(
+        responses={
+            ("launchctl", "bootstrap", "gui/501", str(schedule.launchd_plist_path())): (
+                CommandResult(1, "", "service already loaded")
+            )
+        }
+    )
+    from storepulse.cli.common import CliError
+
+    with pytest.raises(CliError, match="service already loaded"):
+        schedule.cmd_schedule_install(_ns("08:00"), _env(runner))
 
 
 def test_install_default_time_comes_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,6 +433,27 @@ def test_write_passphrase_file_wrong_passphrase_raises(monkeypatch: pytest.Monke
     with pytest.raises(CliError):
         schedule.cmd_schedule_install(_ns("08:00"), env)
     assert not schedule.passphrase_file_path().exists()
+
+
+def test_write_passphrase_file_ignores_stale_env_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale STOREPULSE_PASSPHRASE left in the environment (e.g. from a previous
+    `schedule install`) must not be used to verify the passphrase just typed: that
+    would silently check the wrong value, and then still write the *typed* (unverified)
+    passphrase to the file, which a later scheduled run would fail to decrypt with
+    (review nit #5).
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    cfg = _file_store_cfg(Path("unused"), "correct horse")
+    config.save(cfg)
+    monkeypatch.setenv(PASSPHRASE_ENV, "a different, stale passphrase")
+    runner = FakeRunner(
+        responses={("systemctl", "--user", "--version"): CommandResult(0, "255", "")}
+    )
+    env = _env(runner, ["y", "n"], secrets=["correct horse"])  # confirm file, decline linger
+    assert schedule.cmd_schedule_install(_ns("08:00"), env) == 0
+    assert schedule.passphrase_file_path().read_text() == "correct horse"
 
 
 def test_remove_deletes_passphrase_file(monkeypatch: pytest.MonkeyPatch) -> None:

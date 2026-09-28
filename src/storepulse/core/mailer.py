@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import smtplib
+import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
 from typing import Protocol
@@ -22,7 +23,7 @@ class MailerError(Exception):
 class SMTPLike(Protocol):
     """What `send`/`check` need from an SMTP connection (`smtplib.SMTP`/`SMTP_SSL` satisfy it)."""
 
-    def starttls(self) -> tuple[int, bytes]: ...
+    def starttls(self, *, context: ssl.SSLContext | None = None) -> tuple[int, bytes]: ...
     def login(self, user: str, password: str) -> tuple[int, bytes]: ...
     def send_message(
         self, msg: EmailMessage, from_addr: str | None, to_addrs: list[str] | None
@@ -36,9 +37,17 @@ SMTPFactory = Callable[[str, int, float], SMTPLike]
 
 
 def default_factory(config: EmailConfig) -> SMTPFactory:
-    """`SMTP_SSL` for implicit TLS, `SMTP` (then `starttls()`) otherwise."""
+    """`SMTP_SSL` for implicit TLS, `SMTP` (then `starttls()`) otherwise.
+
+    Both smtplib.SMTP_SSL and SMTP.starttls() silently skip certificate verification
+    when no context is given (they fall back to ssl._create_stdlib_context(), not
+    ssl.create_default_context()) — so this always passes one explicitly.
+    """
+    context = ssl.create_default_context()
     if config.security == "ssl":
-        return lambda host, port, timeout: smtplib.SMTP_SSL(host, port, timeout=timeout)
+        return lambda host, port, timeout: smtplib.SMTP_SSL(
+            host, port, timeout=timeout, context=context
+        )
     return lambda host, port, timeout: smtplib.SMTP(host, port, timeout=timeout)
 
 
@@ -75,7 +84,7 @@ def _connect(config: EmailConfig, factory: SMTPFactory | None) -> SMTPLike:
         ) from None
     if config.security == SECURITY_STARTTLS:
         try:
-            client.starttls()
+            client.starttls(context=ssl.create_default_context())
         except (OSError, smtplib.SMTPException) as exc:
             _quit_quietly(client)
             raise _wrap(config, "STARTTLS failed; check [email] security and port", exc) from None

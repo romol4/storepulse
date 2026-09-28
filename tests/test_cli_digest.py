@@ -32,6 +32,17 @@ def test_digest_writes_html_when_requested(tmp_path: Path) -> None:
         "'2026-09-26T00:00:00+00:00')",
         (app_id,),
     )
+    # apple_sales is a daily-cadence source, so the digest's as-of day reads ingest_log
+    # (not just daily_metrics) to also recognize a real zero-sales day as collected;
+    # a matching 'ok' row is what the real collector always writes alongside the data.
+    db.log_ingest(
+        conn,
+        source="apple_sales",
+        report_date="2026-09-26",
+        started_at="2026-09-26T00:00:00+00:00",
+        status="ok",
+        rows=1,
+    )
     conn.close()
 
     html_path = tmp_path / "digest.html"

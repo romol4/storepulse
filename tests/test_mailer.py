@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import smtplib
+import ssl
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 
@@ -36,9 +37,11 @@ class FakeSMTP:
     fail_send: bool = False
     fail_noop: bool = False
     sent: list[tuple[EmailMessage, str | None, list[str] | None]] = field(default_factory=list)
+    starttls_context: ssl.SSLContext | None = None
 
-    def starttls(self) -> tuple[int, bytes]:
+    def starttls(self, *, context: ssl.SSLContext | None = None) -> tuple[int, bytes]:
         self.calls.append("starttls")
+        self.starttls_context = context
         if self.fail_starttls:
             raise smtplib.SMTPException("starttls failed")
         return (220, b"ready")
@@ -172,11 +175,42 @@ def test_default_factory_picks_smtp_class_by_security(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         smtplib,
         "SMTP_SSL",
-        lambda host, port, timeout: calls.append(f"SMTP_SSL:{host}:{port}:{timeout}"),
+        lambda host, port, timeout, context=None: calls.append(
+            f"SMTP_SSL:{host}:{port}:{timeout}:{context}"
+        ),
     )
     mailer.default_factory(STARTTLS_CONFIG)("h", 1, 2.0)
     mailer.default_factory(SSL_CONFIG)("h", 1, 2.0)
-    assert calls == ["SMTP:h:1:2.0", "SMTP_SSL:h:1:2.0"]
+    assert calls[0] == "SMTP:h:1:2.0"
+    assert calls[1].startswith("SMTP_SSL:h:1:2.0:")
+
+
+def _is_verifying(context: ssl.SSLContext | None) -> bool:
+    return (
+        context is not None
+        and context.verify_mode == ssl.CERT_REQUIRED
+        and context.check_hostname is True
+    )
+
+
+def test_default_factory_ssl_context_verifies_certificates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # smtplib.SMTP_SSL silently skips certificate verification when context=None
+    # (it falls back to ssl._create_stdlib_context(), not ssl.create_default_context()),
+    # so this must always pass a verifying context explicitly.
+    captured: dict[str, ssl.SSLContext | None] = {}
+    monkeypatch.setattr(
+        smtplib,
+        "SMTP_SSL",
+        lambda host, port, timeout, context=None: captured.__setitem__("context", context),
+    )
+    mailer.default_factory(SSL_CONFIG)("h", 1, 2.0)
+    assert _is_verifying(captured["context"])
+
+
+def test_starttls_uses_a_verifying_context() -> None:
+    fake = FakeSMTP()
+    mailer.check(STARTTLS_CONFIG, "hunter2", factory=factory_for(fake))
+    assert _is_verifying(fake.starttls_context)
 
 
 def test_test_message_addressed_to_all_recipients() -> None:

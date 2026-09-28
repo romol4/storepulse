@@ -800,7 +800,10 @@ def run_all(
             current_month = Month.of(today)
             months = sorted({current_month.prev(), current_month})
             earnings_months = sorted({current_month.prev().prev(), current_month.prev()})
-            vitals_dates = [today - timedelta(days=i) for i in reversed(range(days))]
+            # Ends at yesterday, like apple_sales: play_vitals is also a daily-cadence
+            # source (docs/SPEC.md), so today's data isn't expected to be ready yet.
+            vitals_yesterday = today - timedelta(days=1)
+            vitals_dates = [vitals_yesterday - timedelta(days=i) for i in reversed(range(days))]
 
             for label, collect, periods in (
                 ("play_installs", collect_play_installs, months),

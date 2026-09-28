@@ -237,7 +237,13 @@ def _offer_schedule(env: Env, cfg: config.Config) -> None:
     cfg.schedule = dataclasses.replace(cfg.schedule, run_time=run_time)
     config.save(cfg)
     if confirm(env, "Install the daily schedule now?", default=True):
-        schedule_cli.cmd_schedule_install(argparse.Namespace(time=run_time), env)
+        # Email/Apple/Google are already saved at this point; a schedule-install failure
+        # (e.g. no crontab/systemd/launchd reachable) must warn, not fail the whole init.
+        try:
+            schedule_cli.cmd_schedule_install(argparse.Namespace(time=run_time), env)
+        except CliError as exc:
+            env.warn(f"{exc}")
+            env.say("Run `storepulse schedule install` any time to try again.")
     else:
         env.say("Run `storepulse schedule install` any time to automate this.")
 

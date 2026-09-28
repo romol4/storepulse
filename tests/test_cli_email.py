@@ -26,7 +26,7 @@ class FakeSMTP:
     sent: list[EmailMessage] = field(default_factory=list)
     fail_login: bool = False
 
-    def starttls(self) -> tuple[int, bytes]:
+    def starttls(self, *, context: object = None) -> tuple[int, bytes]:
         return (220, b"ready")
 
     def login(self, user: str, password: str) -> tuple[int, bytes]:
