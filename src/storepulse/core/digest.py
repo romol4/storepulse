@@ -38,6 +38,8 @@ _NO_DATA = "—"
 
 _WINDOW_DAYS = 7
 _SPARKLINE_DAYS = 30
+# _build_app_rows slices both 7-day windows out of the sparkline series.
+assert _SPARKLINE_DAYS >= 2 * _WINDOW_DAYS
 _LABEL_WIDTH = 10
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -123,7 +125,7 @@ class _Context:
     vitals_warnings: list[str]
     data_line: str
     app_rows: list[AppRow]
-    # Platforms with no loaded data in this window (e.g. Play bucket access still pending):
+    # Configured platforms that have never loaded data (e.g. Play bucket access pending):
     # shown as "—", never as a real 0, and left out of the combined totals.
     unavailable: frozenset[str] = frozenset()
     quiet_apps: int = 0  # apps collapsed into "+N more" (no installs or proceeds either week)
@@ -343,20 +345,18 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
     return float(row["value"]) if row is not None else None
 
 
-def _build_app_rows(
-    conn: sqlite3.Connection, as_of: date, window: Window, prev_window: Window
-) -> list[AppRow]:
+def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> list[AppRow]:
     apps = conn.execute("SELECT id, name, platform, store_id FROM apps ORDER BY name").fetchall()
     rows: list[AppRow] = []
     for record in apps:
         app_id, name, platform = int(record["id"]), str(record["name"]), str(record["platform"])
         source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
         all_only = platform == "android"
-        installs = _window_total(conn, source, "installs", window, all_only=all_only, app_id=app_id)
-        prev_installs = _window_total(
-            conn, source, "installs", prev_window, all_only=all_only, app_id=app_id
-        )
+        # The 30-day sparkline series ends on as_of, so it already holds both 7-day
+        # windows; slice it instead of querying each window again.
         series = _daily_series(conn, source, app_id, all_only=all_only, end=as_of)
+        installs = sum(series[-_WINDOW_DAYS:])
+        prev_installs = sum(series[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
         proceeds = (
             _window_by_currency(conn, apple_sales.SOURCE, "proceeds", window, app_id=app_id)
             if platform == "ios"
@@ -393,25 +393,21 @@ def _disambiguate(rows: list[AppRow]) -> None:
             row.name = f"{row.name} [{row.store_id}]"
 
 
-def _platform_has_data(conn: sqlite3.Connection, platform: str, window: Window) -> bool:
-    """Whether a platform's installs source has anything for this window.
+def _platform_has_data(conn: sqlite3.Connection, platform: str) -> bool:
+    """Whether a platform has ever loaded data.
 
-    Play writes a row for every day its file covers, zeros included, so no rows means
-    nothing was collected. Apple writes no rows for a zero-sales day, so a successful
-    pull in the window counts too.
+    Deliberately not scoped to the digest window: as_of is the earliest of each
+    platform's latest day, so a stalled platform drags the window back, and checking the
+    other platform against that stale window would show it as "—" while its Data-line
+    entry says ok. Apple writes no rows on zero-sales days, so a successful pull counts.
     """
     source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
-    params = (source, window.start.isoformat(), window.end.isoformat())
-    if conn.execute(
-        "SELECT 1 FROM daily_metrics WHERE source = ? AND date BETWEEN ? AND ? LIMIT 1", params
-    ).fetchone():
+    if conn.execute("SELECT 1 FROM daily_metrics WHERE source = ? LIMIT 1", (source,)).fetchone():
         return True
     if platform == "ios":
         return (
             conn.execute(
-                "SELECT 1 FROM ingest_log WHERE source = ? AND status = 'ok' "
-                "AND report_date BETWEEN ? AND ? LIMIT 1",
-                params,
+                "SELECT 1 FROM ingest_log WHERE source = ? AND status = 'ok' LIMIT 1", (source,)
             ).fetchone()
             is not None
         )
@@ -781,9 +777,9 @@ def build_digest(
     unavailable = frozenset(
         platform
         for platform, configured in (("ios", cfg.apple), ("android", cfg.google))
-        if configured is not None and not _platform_has_data(conn, platform, window)
+        if configured is not None and not _platform_has_data(conn, platform)
     )
-    all_rows = _build_app_rows(conn, as_of, window, prev_window)
+    all_rows = _build_app_rows(conn, as_of, window)
     # Apps of a platform without data are left out (the Data line says why); apps with
     # nothing in either week are collapsed into one "+N more" line.
     app_rows = [r for r in all_rows if r.platform not in unavailable and r.active]
@@ -799,7 +795,9 @@ def build_digest(
         prev_proceeds=_proceeds_by_currency(conn, prev_window),
         sales_gross=_window_by_currency(conn, play_sales.SOURCE, "sales_gross", window),
         top_app=app_rows[0] if app_rows else None,
-        vitals_warnings=_vitals_warnings(app_rows, cfg.digest),
+        # All apps: crash/ANR rates come from the Reporting API, independent of installs
+        # (a quiet app, or a platform whose bucket is unreachable, can still be crashing).
+        vitals_warnings=_vitals_warnings(all_rows, cfg.digest),
         data_line=_data_line(conn, cfg, today, as_of),
         app_rows=app_rows,
         unavailable=unavailable,

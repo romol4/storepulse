@@ -734,3 +734,69 @@ def test_vitals_without_values_says_no_data(
     _log(conn, "play_vitals", AS_OF.isoformat())
     result = digest.build_digest(conn, _cfg(), today=TODAY)
     assert "vitals ok (no data from Google)" in result.text
+
+
+# -- PR #4 review round 1 ---------------------------------------------------------------
+
+
+def _vitals(conn: sqlite3.Connection, app_id: int, crash_28d: float) -> None:
+    d = AS_OF.isoformat()
+    db.replace_source_range(
+        conn,
+        "play_vitals",
+        d,
+        d,
+        [db.MetricRow(d, app_id, "ALL", "crash_rate_28d", "", crash_28d)],
+        app_ids=[app_id],
+    )
+
+
+def test_quiet_app_keeps_its_crash_warning(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """An app with no installs in either week is collapsed, but its over-threshold
+    crash rate must still be warned about: vitals don't depend on installs."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=5.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=0.0)
+    _log(conn, "play_installs", "2026-09-01")
+    _vitals(conn, android_id, 0.02)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Vitals    billFT Android crash rate 2.0% ⚠" in result.text
+    assert "billFT Android crash rate 2.0%" in result.html
+    assert "+1 more app with no installs or proceeds in either week" in result.text
+
+
+def test_crash_warning_survives_unreachable_installs_bucket(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The live account's shape: the Play bucket is still 403 (no installs rows, so
+    Android shows "—"), but vitals come from the Reporting API and still load."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=5.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _vitals(conn, android_id, 0.02)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Android —" in result.text
+    assert "billFT Android crash rate 2.0% ⚠" in result.text
+
+
+def test_stale_apple_does_not_make_android_a_dash(conn: sqlite3.Connection) -> None:
+    """as_of is the earliest platform's latest day, so a stalled Apple drags the window
+    back. Android has data (just none in that old window) and must not read "—"."""
+    ios = db.upsert_app(conn, "ios", "1", "deskFT")
+    android = db.upsert_app(conn, "android", "com.x", "billFT")
+    apple_last = date(2026, 9, 6)
+    for i in range(14):
+        d = (apple_last - timedelta(days=i)).isoformat()
+        _apple_day(conn, d, ios, installs=2.0, proceeds=0)
+        _log(conn, "apple_sales", d)
+    rows = []
+    for i in range(7):
+        d = (AS_OF - timedelta(days=i)).isoformat()  # Sep 20-26 only
+        rows.append(db.MetricRow(d, android, "ALL", "installs", "", 3.0))
+    db.replace_source_range(conn, "play_installs", "2026-09-20", "2026-09-26", rows)
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert result.as_of == apple_last
+    assert "Android —" not in result.text
+    assert result.text.splitlines()[1] == "Installs  14 (+0% wk)   iOS 14 · Android 0"
