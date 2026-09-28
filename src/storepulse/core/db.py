@@ -296,12 +296,18 @@ def log_ingest(
     status: str,
     rows: int | None = None,
     note: str | None = None,
+    app_id: int | None = None,
 ) -> None:
-    """Record the outcome of one source/date pull. ``note`` goes in the ``error`` column."""
+    """Record the outcome of one source/date pull. ``note`` goes in the ``error`` column.
+
+    ``app_id`` scopes the attempt to one app, for a per-app source (play_installs,
+    play_vitals) that logs one row per app under the same report_date; leave it unset
+    for an account-wide source (apple_sales, play_sales, play_earnings).
+    """
     if status not in INGEST_STATUSES:
         raise ValueError(f"unknown ingest status {status!r}")
     conn.execute(
-        "INSERT INTO ingest_log (source, report_date, started_at, finished_at, status, rows, error)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (source, report_date, started_at, utc_now(), status, rows, note),
+        "INSERT INTO ingest_log (source, report_date, started_at, finished_at, status, rows, "
+        "error, app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (source, report_date, started_at, utc_now(), status, rows, note, app_id),
     )

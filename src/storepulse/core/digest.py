@@ -391,31 +391,61 @@ def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[st
     return sources
 
 
+def _window_bounds(source: str, today: date, days: int) -> tuple[str, str]:
+    """The report_dates the daily run currently re-attempts for this source.
+
+    Used to scope the error check in _source_note: an old, never-retried error from a
+    one-off backfill (the daily run only re-touches the last `days` days) must not flag
+    the digest forever.
+    """
+    cadence = _SOURCE_CADENCE[source]
+    if cadence == "daily":
+        yesterday = today - timedelta(days=1)
+        start = yesterday - timedelta(days=days - 1)
+        return start.isoformat(), yesterday.isoformat()
+    if cadence == "monthly":
+        current = Month.of(today)
+        return current.prev().first_day.isoformat(), current.first_day.isoformat()
+    if cadence == "earnings":
+        prev = Month.of(today).prev()
+        return prev.prev().first_day.isoformat(), prev.first_day.isoformat()
+    raise AssertionError(f"unknown cadence for {source!r}")
+
+
 def _source_note(
-    conn: sqlite3.Connection, source: str, as_of: date
+    conn: sqlite3.Connection, source: str, today: date, days: int
 ) -> tuple[bool, str | None, str | None]:
     """(has_unresolved_error, latest_ok_date, latest_not_ready_date).
 
-    has_unresolved_error is true if *any* report_date's most recent attempt for this
-    source is an error — not just whichever ingest_log row happens to have the latest
-    started_at overall. started_at has only 1-second resolution, so on a fast run
-    (e.g. backfill) it cannot reliably order same-second attempts; id (the insertion
-    order) can. Using only the single globally-latest row also let a later report_date
-    succeeding hide an earlier one's unresolved error (or, for Play sources that log one
-    row per app/period, a different app's) — the spec requires any error to surface.
+    has_unresolved_error is true if, among the report_dates the daily run currently
+    re-attempts (_window_bounds — an old, never-retried backfill error must not flag the
+    digest forever), any (report_date, app)'s most recent attempt is an error.
+
+    Grouping includes app_id, not just report_date: play_installs and play_vitals log
+    one row per app under the same report_date (that month's first day, for installs),
+    so report_date alone would let one app's later success hide a different app's
+    error. app_id is NULL for an account-wide source (apple_sales, play_sales,
+    play_earnings), where report_date alone already identifies one attempt; "b.app_id
+    IS a.app_id" (not "=") so two NULLs still count as the same attempt-group there.
+
+    started_at is not a reliable tie-breaker for "most recent": it has only
+    one-second resolution, so id (insertion order) is used instead.
     """
+    start, end = _window_bounds(source, today, days)
     has_error = conn.execute(
         """
         SELECT 1 FROM ingest_log a
         WHERE a.source = ? AND a.status = 'error'
+        AND a.report_date BETWEEN ? AND ?
         AND a.id = (
             SELECT b.id FROM ingest_log b
             WHERE b.source = a.source AND b.report_date = a.report_date
+            AND b.app_id IS a.app_id
             ORDER BY b.id DESC LIMIT 1
         )
         LIMIT 1
         """,
-        (source,),
+        (source, start, end),
     ).fetchone()
     ok_row = conn.execute(
         "SELECT MAX(report_date) AS d FROM ingest_log WHERE source = ? AND status = 'ok'", (source,)
@@ -441,10 +471,10 @@ def _is_overdue(source: str, latest_ok: str | None, today: date, stale_days: int
 
 
 def _source_status_text(
-    conn: sqlite3.Connection, source: str, today: date, as_of: date, stale_days: int
+    conn: sqlite3.Connection, source: str, today: date, as_of: date, stale_days: int, days: int
 ) -> str:
     label = _SOURCE_LABELS[source]
-    has_error, latest_ok, latest_not_ready = _source_note(conn, source, as_of)
+    has_error, latest_ok, latest_not_ready = _source_note(conn, source, today, days)
     if has_error:
         return f"{label} error"
     if _is_overdue(source, latest_ok, today, stale_days):
@@ -469,7 +499,8 @@ def _data_line(conn: sqlite3.Connection, cfg: config.Config, today: date, as_of:
     if not sources:
         return ""
     parts = [
-        _source_status_text(conn, source, today, as_of, cfg.digest.stale_days) for source in sources
+        _source_status_text(conn, source, today, as_of, cfg.digest.stale_days, cfg.schedule.days)
+        for source in sources
     ]
     return f" {_DOT} ".join(parts)
 

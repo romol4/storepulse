@@ -183,7 +183,10 @@ CREATE TABLE ingest_log (
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, report_date TEXT NOT NULL,
   started_at TEXT NOT NULL, finished_at TEXT,
   status TEXT NOT NULL CHECK (status IN ('ok','not_ready','error')),
-  rows INTEGER, error TEXT
+  rows INTEGER, error TEXT,
+  app_id INTEGER REFERENCES apps(id)  -- set for a per-app source (play_installs, play_vitals);
+                                       -- NULL for an account-wide one (apple_sales, play_sales,
+                                       -- play_earnings), where report_date alone identifies a pull
 );
 
 CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, Apple SKU map, schema version
@@ -264,6 +267,13 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
   - daily sources (`apple_sales`, `play_vitals`): still `not_ready` 4 days after `report_date`;
   - `play_installs` and `play_sales` (monthly files rewritten daily, logged with the month's first day): still `not_ready` 4 days into the month;
   - `play_earnings` (published once, early in the following month): still `not_ready` after the 15th of the month following `report_date`.
+- The error flag looks only at `report_date`s the daily run currently re-attempts (the
+  last `[schedule].days` days for a daily source; the current and previous month for a
+  monthly one; the two months before the current one for earnings) — an old, never-retried
+  error from a one-off backfill outside that range does not flag the digest forever.
+  For a per-app source (`play_installs`, `play_vitals`, one `ingest_log` row per app per
+  `report_date`), the flag is per app: a later success for one app never hides another
+  app's still-unresolved error for the same `report_date`.
 
 ## Outputs
 

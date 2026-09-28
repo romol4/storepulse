@@ -44,9 +44,21 @@ def _android_earnings_day(
     )
 
 
-def _log(conn: sqlite3.Connection, source: str, report_date: str, status: str = "ok") -> None:
+def _log(
+    conn: sqlite3.Connection,
+    source: str,
+    report_date: str,
+    status: str = "ok",
+    app_id: int | None = None,
+) -> None:
     db.log_ingest(
-        conn, source=source, report_date=report_date, started_at=db.utc_now(), status=status, rows=1
+        conn,
+        source=source,
+        report_date=report_date,
+        started_at=db.utc_now(),
+        status=status,
+        rows=1,
+        app_id=app_id,
     )
 
 
@@ -409,6 +421,49 @@ def test_mid_window_error_is_not_hidden_by_a_later_success(
             _log(conn, "apple_sales", d)  # logged 'ok' after the error, like later days would be
     result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
     assert "apple_sales error" in result.text
+
+
+def test_play_installs_error_on_one_app_is_not_hidden_by_another_apps_success(
+    conn: sqlite3.Connection, android_id: int
+) -> None:
+    """play_installs logs one row per app under the same report_date (that month's
+    first day), so grouping the "most recent attempt" query by report_date alone let a
+    later 'ok' for one app hide a different app's still-unresolved error for that same
+    report_date. app_id must be part of the grouping (review round 2, finding 1).
+    """
+    other_id = db.upsert_app(conn, "android", "com.example.other", "otherApp")
+    _android_installs_day(conn, "2026-09-01", android_id, installs=1)
+    _log(conn, "play_installs", "2026-09-01", status="error", app_id=other_id)
+    _log(conn, "play_installs", "2026-09-01", app_id=android_id)  # a different app, logged after
+    result = digest.build_digest(conn, _cfg(apple=None), today=date(2026, 9, 3))
+    assert "play_installs error" in result.text
+
+
+def test_play_vitals_error_on_one_app_is_not_hidden_by_another_apps_success(
+    conn: sqlite3.Connection, android_id: int
+) -> None:
+    other_id = db.upsert_app(conn, "android", "com.example.other", "otherApp")
+    _android_installs_day(conn, "2026-09-01", android_id, installs=1)
+    _log(conn, "play_installs", "2026-09-01", app_id=android_id)
+    _log(conn, "play_vitals", AS_OF.isoformat(), status="error", app_id=other_id)
+    _log(conn, "play_vitals", AS_OF.isoformat(), app_id=android_id)  # a different app, after
+    result = digest.build_digest(conn, _cfg(apple=None), today=TODAY)
+    assert "vitals error" in result.text
+
+
+def test_old_backfill_error_outside_the_window_does_not_flag_forever(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    """An error from a one-off backfill day the daily run no longer re-touches (it only
+    re-pulls the last `[schedule].days` days) must not flag the digest indefinitely
+    (review round 2, finding 2).
+    """
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())  # today's run: ok
+    _log(conn, "apple_sales", "2026-03-10", status="error")  # old backfill error, never retried
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_sales error" not in result.text
+    assert "apple_sales ok" in result.text
 
 
 # -- per-app rows / no cross-platform pairing ------------------------------------------------

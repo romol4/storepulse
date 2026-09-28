@@ -262,6 +262,8 @@ def _error(
     report_date: str,
     started: str,
     exc: Exception,
+    *,
+    app_id: int | None = None,
 ) -> None:
     message = redact(f"{type(exc).__name__}: {exc}")
     log.error("%s %s failed: %s", summary.source, label, message)
@@ -273,6 +275,7 @@ def _error(
         started_at=started,
         status="error",
         note=f"{label}: {message}",
+        app_id=app_id,
     )
 
 
@@ -283,6 +286,8 @@ def _month_status(
     month: Month,
     plan: str,
     progress: Callable[[str, str], None] | None,
+    *,
+    app_id: int | None = None,
 ) -> bool:
     """Handle every plan except "collect". Returns True if the month needs collecting."""
     if plan == "collect":
@@ -295,7 +300,12 @@ def _month_status(
     if plan == "not_ready":
         summary.not_ready.append(label)
         db.log_ingest(
-            conn, source=summary.source, report_date=iso, started_at=started, status="not_ready"
+            conn,
+            source=summary.source,
+            report_date=iso,
+            started_at=started,
+            status="not_ready",
+            app_id=app_id,
         )
         outcome = "not ready yet"
     else:
@@ -308,6 +318,7 @@ def _month_status(
             status="ok",
             rows=0,
             note=f"{label}: no file",
+            app_id=app_id,
         )
         outcome = "no file"
     if progress:
@@ -334,7 +345,15 @@ def collect_play_installs(
                 o.name for o in client.list_objects(bucket, play_installs.object_prefix(package))
             ]
         except Exception as exc:
-            _error(conn, summary, package, months[-1].first_day.isoformat(), db.utc_now(), exc)
+            _error(
+                conn,
+                summary,
+                package,
+                months[-1].first_day.isoformat(),
+                db.utc_now(),
+                exc,
+                app_id=app_id,
+            )
             continue
         files = play_installs.month_files(names, package)
         if not files:
@@ -348,7 +367,7 @@ def collect_play_installs(
         for month in months:
             label = f"{package} {month}"
             plan = plan_month(month, set(files), today)
-            if not _month_status(conn, summary, label, month, plan, progress):
+            if not _month_status(conn, summary, label, month, plan, progress, app_id=app_id):
                 continue
             started = db.utc_now()
             try:
@@ -370,7 +389,9 @@ def collect_play_installs(
                     app_ids=[app_id],
                 )
             except Exception as exc:
-                _error(conn, summary, label, month.first_day.isoformat(), started, exc)
+                _error(
+                    conn, summary, label, month.first_day.isoformat(), started, exc, app_id=app_id
+                )
                 if progress:
                     progress(label, "error")
                 continue
@@ -384,6 +405,7 @@ def collect_play_installs(
                 status="ok",
                 rows=written,
                 note=package,
+                app_id=app_id,
             )
             if progress:
                 progress(label, f"ok, {written} rows")
@@ -590,7 +612,7 @@ def collect_play_vitals(
                     app_ids=[app_id],
                 )
         except Exception as exc:
-            _error(conn, summary, package, dates[-1].isoformat(), started, exc)
+            _error(conn, summary, package, dates[-1].isoformat(), started, exc, app_id=app_id)
             if progress:
                 progress(package, "error")
             continue
@@ -608,6 +630,7 @@ def collect_play_vitals(
                     status="ok",
                     rows=per_day[iso],
                     note=package,
+                    app_id=app_id,
                 )
             else:
                 summary.not_ready.append(f"{package} {iso}")
@@ -618,6 +641,7 @@ def collect_play_vitals(
                     started_at=started,
                     status="not_ready",
                     note=package,
+                    app_id=app_id,
                 )
         if progress:
             progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready")
