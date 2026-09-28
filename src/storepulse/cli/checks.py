@@ -159,9 +159,10 @@ def check_google(client: GoogleClient, bucket: str) -> CheckResult:
             result.checks.append(
                 Check(
                     "warn",
-                    f"No Android {what} reports visible, so Android revenue won't be "
-                    f"collected. That needs the optional '{FINANCIAL_PERMISSION}' permission "
-                    "(global) in Play Console > Users and permissions.",
+                    f"No Android {what} reports visible. If the account has no Android "
+                    "revenue yet, ignore this. Otherwise Android revenue won't be collected "
+                    f"until the service account has the optional '{FINANCIAL_PERMISSION}' "
+                    "permission (global) in Play Console > Users and permissions.",
                 )
             )
     try:

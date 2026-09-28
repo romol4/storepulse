@@ -107,7 +107,8 @@ from the Play Developer Reporting API, using one service account:
    - **Optional, for Android revenue only:** also grant **View financial data,
      orders, and cancellation survey responses**, set to *Global*. Without it
      everything else works; sales and earnings are skipped and `storepulse doctor`
-     says so.
+     says so. If you have no paid apps or in-app purchases yet, there are no sales or
+     earnings reports either, so expect the same warning and ignore it.
    - New service accounts can take **24–48 hours** before Play permissions work.
      `storepulse doctor` tells you when they do.
 3. **Copy the bucket URI.** In Play Console, go to Download reports → Statistics →

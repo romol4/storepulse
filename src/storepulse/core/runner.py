@@ -409,13 +409,13 @@ def _collect_account_months(
     try:
         files = month_files([o.name for o in client.list_objects(bucket, prefix)])
         if not files:
-            # Can't tell "no reports yet" from "not allowed to see them" by listing, and
-            # the usual cause is the optional financial permission, so say so every time.
+            # Listing can't tell "no reports yet" from "not allowed to see them", so the
+            # warning names both causes: no Android revenue, or the missing permission.
             summary.warnings.append(
-                f"no {source} files are visible under gs://{bucket}/{prefix}, so Android "
-                f"revenue can't be collected. Grant the service account "
-                f"'{FINANCIAL_PERMISSION}' (global) in Play Console > Users and permissions "
-                "(see README, 'Google service account')."
+                f"no {source} files are visible under gs://{bucket}/{prefix}. If the account "
+                "has no Android revenue yet, ignore this. Otherwise grant the service account "
+                f"the optional '{FINANCIAL_PERMISSION}' permission (global) in Play Console > "
+                "Users and permissions (see README, 'Google service account')."
             )
             return summary
     except Exception as exc:

@@ -132,7 +132,7 @@ class GoogleClient:
         """Map 401/403 to the right fix, always keeping Google's own message."""
         email = self.sa.client_email
         said = redact(_error_text(response))
-        said_text = f" Google said: {said}" if said else ""
+        said_text = f" Google said: {_as_sentence(said)}" if said else ""
         if status == 401:
             return GoogleAuthError(
                 f"Google rejected the access token for {purpose} (HTTP 401). "
@@ -144,8 +144,9 @@ class GoogleClient:
             # Not a Play permission: e.g. the Reporting API isn't enabled in the Cloud
             # project. Google's message says exactly what to do (and links to it).
             return GoogleAuthError(
-                f"Google denied {purpose} (HTTP 403) for {email}: {said or 'access denied'}. "
-                f"This is a Google Cloud project setting, not a Play Console permission. "
+                f"Google denied {purpose} (HTTP 403) for {email}: "
+                f"{_as_sentence(said or 'access denied')} "
+                "This is a Google Cloud project setting, not a Play Console permission. "
                 f"{DOCS_HINT}",
                 status,
             )
@@ -307,6 +308,11 @@ class GoogleClient:
             if not token:
                 return values
             body = {**body, "pageToken": str(token)}
+
+
+def _as_sentence(text: str) -> str:
+    """End ``text`` with one full stop, so the hint appended after it reads correctly."""
+    return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
 def _error_reasons(response: httpx.Response) -> set[str]:
