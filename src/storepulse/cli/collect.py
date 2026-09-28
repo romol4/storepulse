@@ -156,8 +156,8 @@ def backfill_apple(
             "hasn't seen yet. Re-run this backfill after the app has a download in the "
             "range (or once the key can list apps) to pick them up."
         )
-    for day, message in summary.errors:
-        env.warn(f"{day}: {message}")
+    for line in runner.group_errors(summary.errors):
+        env.warn(line)
     return 1 if summary.errors else 0
 
 
@@ -243,6 +243,11 @@ def _report_play(env: Env, summary: runner.PlaySummary) -> None:
         env.warn(warning)
     for note in summary.notes:
         env.warn(note)
-    for label, message in summary.errors:
-        env.warn(f"{label}: {message}")
+    if summary.source == play_vitals.SOURCE and summary.ok and not summary.rows:
+        env.say(
+            "Google returned no vitals values for these days. That's normal for apps below "
+            "its minimum number of users; Play Console then shows no crash or ANR rate either."
+        )
+    for line in runner.group_errors(summary.errors):
+        env.warn(line)
     env.say()
