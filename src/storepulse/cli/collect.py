@@ -15,7 +15,7 @@ from storepulse.cli.common import (
     google_client,
     store_for_run,
 )
-from storepulse.core import config, db, runner
+from storepulse.core import config, db, discovery, runner
 from storepulse.core.sources import (
     apple_sales,
     play_earnings,
@@ -186,11 +186,22 @@ def backfill_play(
         bucket = parse_bucket_uri(cfg.google.bucket_uri)
     except (GoogleCredentialError, ValueError) as exc:
         raise CliError(str(exc)) from None
-    if not db.apps_for(conn, "android"):
-        env.warn("no Android apps are registered yet; run `storepulse init` to discover them.")
+    known_before = set(db.apps_for(conn, "android"))
     today = env.pacific_today()
     failed = False
     with google_client(env, sa) as client:
+        # Discover on every run, so apps launched after setup are collected too.
+        found = discovery.refresh_play_apps(client, conn, bucket)
+        if found.status != "ok":
+            env.warn(found.message)
+        new = [name for package, name in found.apps if package not in known_before]
+        if new:
+            env.say(f"New Android apps: {', '.join(new)}")
+        if not db.apps_for(conn, "android"):
+            env.warn(
+                "no Android apps are visible to the service account yet; run "
+                "`storepulse doctor` to see why."
+            )
         for source in sources:
             env.say(f"Loading {source}...")
 
@@ -228,6 +239,8 @@ def _report_play(env: Env, summary: runner.PlaySummary) -> None:
             "Final earnings already replace provisional sales for: "
             + ", ".join(summary.already_final)
         )
+    for warning in summary.warnings:
+        env.warn(warning)
     for note in summary.notes:
         env.warn(note)
     for label, message in summary.errors:

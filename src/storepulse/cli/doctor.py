@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from storepulse.cli.checks import Check, check_apple, check_google
+from storepulse.cli.checks import Check, check_apple, check_google, check_vitals
 from storepulse.cli.common import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
@@ -15,7 +15,7 @@ from storepulse.cli.common import (
     store_for_run,
 )
 from storepulse.cli.setup import report
-from storepulse.core import config, db
+from storepulse.core import config, db, discovery
 from storepulse.core.secrets import SecretStoreError
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import parse_bucket_uri
@@ -66,20 +66,39 @@ def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
             except (GoogleCredentialError, ValueError) as exc:
                 section("Google Play", [Check("fail", str(exc))])
             else:
-                conn = db.connect(config.db_path())
-                try:
-                    packages = sorted(db.apps_for(conn, "android"))
-                finally:
-                    conn.close()
                 with google_client(env, sa) as gclient:
-                    gresult = check_google(gclient, bucket, packages=packages)
+                    gresult = check_google(gclient, bucket)
+                    conn = db.connect(config.db_path())
+                    try:
+                        # Register what's visible now, so apps launched after setup are
+                        # picked up without re-running init.
+                        discovery.register_play_apps(conn, gresult.apps)
+                        packages = sorted(db.apps_for(conn, "android"))
+                    finally:
+                        conn.close()
+                    gresult.checks.append(
+                        Check(
+                            "ok" if packages else "warn",
+                            f"{len(gresult.apps)} Android app(s) visible, "
+                            f"{len(packages)} registered.",
+                        )
+                    )
+                    gresult.checks += check_vitals(gclient, packages)
                 section("Google Play", gresult.checks)
 
     env.say("SMTP: not configured yet (arrives with the daily email).")
+    env.say("(doctor reads metadata only; the Apple check requests one day's sales report.)")
     failed = [c for c in checks if c.level == "fail"]
     env.say()
     if failed:
         env.say(f"{len(failed)} check(s) failed.")
         return 1
-    env.say("All checks passed.")
+    warned = [c for c in checks if c.level == "warn"]
+    if warned:
+        env.say(
+            f"No failures, but {len(warned)} warning(s): some data may not be collected "
+            "until they're resolved."
+        )
+    else:
+        env.say("All checks passed.")
     return 0

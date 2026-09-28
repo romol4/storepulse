@@ -7,7 +7,13 @@ from datetime import date, timedelta
 from typing import Literal
 
 from storepulse.core import discovery
-from storepulse.core.sources import apple_sales, play_installs, play_vitals
+from storepulse.core.sources import (
+    apple_sales,
+    play_earnings,
+    play_installs,
+    play_sales,
+    play_vitals,
+)
 from storepulse.core.sources.apple_client import (
     AppleAgreementError,
     AppleAuthError,
@@ -15,7 +21,12 @@ from storepulse.core.sources.apple_client import (
     AppleError,
     AppleVendorError,
 )
-from storepulse.core.sources.google_client import GoogleAuthError, GoogleClient, GoogleError
+from storepulse.core.sources.google_client import (
+    FINANCIAL_PERMISSION,
+    GoogleAuthError,
+    GoogleClient,
+    GoogleError,
+)
 
 # Old enough that the report should exist, recent enough that Apple still keeps it.
 APPLE_PROBE_DAYS_AGO = 3
@@ -105,10 +116,11 @@ def _google_fail(exc: GoogleError) -> Check:
     )
 
 
-def check_google(
-    client: GoogleClient, bucket: str, *, packages: list[str] | None = None
-) -> CheckResult:
-    """Token, bucket, app listing; with ``packages``, also vitals freshness per app."""
+def check_google(client: GoogleClient, bucket: str) -> CheckResult:
+    """Token, bucket (installs, plus the optional financial prefixes), and app listing.
+
+    Reads object metadata only; no report file is downloaded.
+    """
     result = CheckResult()
     try:
         client.check_token()
@@ -117,30 +129,64 @@ def check_google(
         result.checks.append(_google_fail(exc))
         return result
     try:
-        objects = client.list_objects(bucket, play_installs.PREFIX)
-        result.checks.append(
-            Check("ok", f"Bucket gs://{bucket} readable ({len(objects)} installs files).")
-        )
+        if client.list_objects(bucket, play_installs.PREFIX, max_results=1):
+            result.checks.append(Check("ok", f"Bucket gs://{bucket}: installs reports visible."))
+        else:
+            result.checks.append(
+                Check(
+                    "warn",
+                    f"Bucket gs://{bucket} is readable but has no installs reports yet. New "
+                    "accounts and apps take a day or two; otherwise check the bucket URI.",
+                )
+            )
     except GoogleError as exc:
         result.checks.append(_google_fail(exc))
+    for prefix, what in ((play_sales.PREFIX, "sales"), (play_earnings.PREFIX, "earnings")):
+        try:
+            visible = bool(client.list_objects(bucket, prefix, max_results=1))
+        except GoogleAuthError as exc:
+            if not exc.pending_permission:
+                result.checks.append(_google_fail(exc))
+                continue
+            visible = False
+        except GoogleError as exc:
+            result.checks.append(_google_fail(exc))
+            continue
+        if visible:
+            result.checks.append(Check("ok", f"Android {what} reports visible."))
+        else:
+            # Optional: without it everything else works, but Android revenue is missing.
+            result.checks.append(
+                Check(
+                    "warn",
+                    f"No Android {what} reports visible, so Android revenue won't be "
+                    f"collected. That needs the optional '{FINANCIAL_PERMISSION}' permission "
+                    "(global) in Play Console > Users and permissions.",
+                )
+            )
     try:
         result.apps = client.search_apps()
+        level: Level = "ok" if result.apps else "warn"
         result.checks.append(
-            Check("ok", f"Play Developer Reporting API: {len(result.apps)} app(s) visible.")
+            Check(level, f"Play Developer Reporting API: {len(result.apps)} app(s) visible.")
         )
     except GoogleError as exc:
         result.checks.append(_google_fail(exc))
-    for package in packages or []:
+    return result
+
+
+def check_vitals(client: GoogleClient, packages: list[str]) -> list[Check]:
+    """Freshness of both vitals metric sets for each package (metadata only)."""
+    checks: list[Check] = []
+    for package in packages:
         for metric_set in play_vitals.METRIC_SETS:
             try:
                 latest = client.latest_daily_date(package, metric_set)
             except GoogleError as exc:
-                result.checks.append(_google_fail(exc))
+                checks.append(_google_fail(exc))
                 continue
             if latest is None:
-                text = f"{package} {metric_set}: no daily data reported yet."
-                result.checks.append(Check("warn", text))
+                checks.append(Check("warn", f"{package} {metric_set}: no daily data reported yet."))
             else:
-                text = f"{package} {metric_set}: data through {latest}."
-                result.checks.append(Check("ok", text))
-    return result
+                checks.append(Check("ok", f"{package} {metric_set}: data through {latest}."))
+    return checks

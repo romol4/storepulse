@@ -25,6 +25,21 @@ log = logging.getLogger(__name__)
 GCS_BASE = "https://storage.googleapis.com/storage/v1"
 REPORTING_BASE = "https://playdeveloperreporting.googleapis.com/v1beta1"
 REPORTING_TZ = "America/Los_Angeles"
+
+BULK_PERMISSION = "View app information and download bulk reports"
+FINANCIAL_PERMISSION = "View financial data, orders, and cancellation survey responses"
+# Bucket prefixes that need the financial permission (granted globally).
+FINANCIAL_PREFIXES = ("sales/", "earnings/")
+# 403 reasons that are Cloud project problems, not Play permissions.
+HARD_403_REASONS = frozenset(
+    {"SERVICE_DISABLED", "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "accessNotConfigured"}
+)
+
+
+def permission_for(object_name: str) -> str:
+    return FINANCIAL_PERMISSION if object_name.startswith(FINANCIAL_PREFIXES) else BULK_PERMISSION
+
+
 MAX_ATTEMPTS = 3
 
 
@@ -111,22 +126,36 @@ class GoogleClient:
         except TokenError as exc:
             raise GoogleAuthError(str(exc), exc.status) from None
 
-    def _denied(self, status: int, purpose: str) -> GoogleAuthError:
+    def _denied(
+        self, status: int, purpose: str, response: httpx.Response, permission: str
+    ) -> GoogleAuthError:
+        """Map 401/403 to the right fix, always keeping Google's own message."""
         email = self.sa.client_email
-        if status == 403:
+        said = redact(_error_text(response))
+        said_text = f" Google said: {said}" if said else ""
+        if status == 401:
             return GoogleAuthError(
-                f"Google denied {purpose} (HTTP 403) for {email}. The key is valid, so this is "
-                "a permission problem: in Play Console → Users and permissions, invite this "
-                "email with 'View app information and download bulk reports' for all apps. "
-                "If you just did, new service accounts can take 24-48 hours before Play "
-                f"permissions take effect. {DOCS_HINT}",
+                f"Google rejected the access token for {purpose} (HTTP 401). "
+                f"Check the service account key.{said_text} {DOCS_HINT}",
                 status,
-                pending_permission=True,
+            )
+        reasons = _error_reasons(response)
+        if reasons & HARD_403_REASONS:
+            # Not a Play permission: e.g. the Reporting API isn't enabled in the Cloud
+            # project. Google's message says exactly what to do (and links to it).
+            return GoogleAuthError(
+                f"Google denied {purpose} (HTTP 403) for {email}: {said or 'access denied'}. "
+                f"This is a Google Cloud project setting, not a Play Console permission. "
+                f"{DOCS_HINT}",
+                status,
             )
         return GoogleAuthError(
-            f"Google rejected the access token for {purpose} (HTTP {status}). "
-            f"Check the service account key. {DOCS_HINT}",
+            f"Google denied {purpose} (HTTP 403) for {email}. The key is valid, so this is a "
+            f"Play Console permission: in Users and permissions, give this email "
+            f"'{permission}'. If you just did, new service accounts can take 24-48 hours "
+            f"before Play permissions take effect.{said_text} {DOCS_HINT}",
             status,
+            pending_permission=True,
         )
 
     def request(
@@ -137,6 +166,7 @@ class GoogleClient:
         params: Mapping[str, str] | None = None,
         json: Mapping[str, Any] | None = None,
         purpose: str = "this request",
+        permission: str = BULK_PERMISSION,
     ) -> httpx.Response:
         reauthed = False
         attempt = 0
@@ -163,7 +193,7 @@ class GoogleClient:
                 attempt -= 1
                 continue
             if status in (401, 403):
-                raise self._denied(status, purpose)
+                raise self._denied(status, purpose, response, permission)
             if (status == 429 or status >= 500) and attempt < MAX_ATTEMPTS:
                 self._backoff(attempt, f"HTTP {status}")
                 continue
@@ -179,25 +209,39 @@ class GoogleClient:
 
     # -- Cloud Storage -----------------------------------------------------------------
 
-    def list_objects(self, bucket: str, prefix: str) -> list[GcsObject]:
+    def list_objects(
+        self, bucket: str, prefix: str, *, max_results: int | None = None
+    ) -> list[GcsObject]:
+        """List object metadata under a prefix. ``max_results`` stops after one page of at
+        most that many objects (a cheap "can I see anything here?" probe)."""
         url = f"{GCS_BASE}/b/{quote(bucket, safe='')}/o"
         params: dict[str, str] = {"prefix": prefix, "fields": "items(name,size),nextPageToken"}
+        if max_results is not None:
+            params["maxResults"] = str(max_results)
         found: list[GcsObject] = []
         while True:
             body = self.request(
-                "GET", url, params=params, purpose=f"listing gs://{bucket}/{prefix}"
+                "GET",
+                url,
+                params=params,
+                purpose=f"listing gs://{bucket}/{prefix}",
+                permission=permission_for(prefix),
             ).json()
             for item in body.get("items") or []:
                 found.append(GcsObject(str(item["name"]), int(item.get("size", 0))))
             token = body.get("nextPageToken")
-            if not token:
+            if not token or max_results is not None:
                 return found
             params = {**params, "pageToken": str(token)}
 
     def download(self, bucket: str, name: str) -> bytes:
         url = f"{GCS_BASE}/b/{quote(bucket, safe='')}/o/{quote(name, safe='')}"
         return self.request(
-            "GET", url, params={"alt": "media"}, purpose=f"downloading gs://{bucket}/{name}"
+            "GET",
+            url,
+            params={"alt": "media"},
+            purpose=f"downloading gs://{bucket}/{name}",
+            permission=permission_for(name),
         ).content
 
     # -- Play Developer Reporting API ----------------------------------------------------
@@ -263,6 +307,24 @@ class GoogleClient:
             if not token:
                 return values
             body = {**body, "pageToken": str(token)}
+
+
+def _error_reasons(response: httpx.Response) -> set[str]:
+    """Reasons from ``error.details[].reason`` (google.rpc.ErrorInfo) and GCS's
+    ``error.errors[].reason``."""
+    try:
+        body = response.json()
+    except ValueError:
+        return set()
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return set()
+    reasons: set[str] = set()
+    for key in ("details", "errors"):
+        for item in error.get(key) or []:
+            if isinstance(item, dict) and item.get("reason"):
+                reasons.add(str(item["reason"]))
+    return reasons
 
 
 def _error_text(response: httpx.Response) -> str:

@@ -168,8 +168,13 @@ def test_provisional_sales_replaced_by_earnings(
     earnings = runner.collect_play_earnings(conn, client, BUCKET, [AUG, SEP], today=TODAY)
     assert earnings.ok == 1  # August; September's report can't exist yet
     rows = conn.execute(
-        "SELECT date, source FROM daily_metrics WHERE metric = 'proceeds' ORDER BY date"
+        "SELECT date, source, metric FROM daily_metrics "
+        "WHERE metric IN ('proceeds', 'sales_gross') ORDER BY date"
     ).fetchall()
+    assert {(r["source"], r["metric"]) for r in rows} == {
+        ("play_earnings", "proceeds"),
+        ("play_sales", "sales_gross"),
+    }
     august = [r["source"] for r in rows if r["date"].startswith("2026-08")]
     september = [r["source"] for r in rows if r["date"].startswith("2026-09")]
     assert set(august) == {"play_earnings"}  # provisional rows gone
@@ -187,7 +192,7 @@ def test_provisional_sales_replaced_by_earnings(
     # Re-running earnings keeps counts stable.
     before = _count(conn, "play_earnings")
     runner.collect_play_earnings(conn, client, BUCKET, [AUG], today=TODAY)
-    assert _count(conn, "play_earnings") == before == 2
+    assert _count(conn, "play_earnings") == before == 3
 
 
 def test_sales_launch_month_is_account_wide(

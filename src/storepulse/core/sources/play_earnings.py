@@ -7,7 +7,7 @@ month replaces that month's provisional ``play_sales`` rows in the same transact
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from storepulse.core import db
@@ -38,14 +38,18 @@ def done_key(month: Month) -> str:
 class MappedMonth:
     rows: list[db.MetricRow]
     unmapped_rows: int = 0
-    out_of_month_rows: int = 0
+    unmapped_amounts: dict[str, float] = field(default_factory=dict)
+    moved_rows: int = 0
 
     def note(self) -> str | None:
         parts = []
         if self.unmapped_rows:
-            parts.append(f"{self.unmapped_rows} rows without a known package")
-        if self.out_of_month_rows:
-            parts.append(f"{self.out_of_month_rows} rows dated outside the month")
+            amounts = ", ".join(
+                f"{cur} {amount:.2f}" for cur, amount in sorted(self.unmapped_amounts.items())
+            )
+            parts.append(f"unattributed (no known package): {self.unmapped_rows} rows, {amounts}")
+        if self.moved_rows:
+            parts.append(f"{self.moved_rows} rows dated outside the month moved to its edge")
         return "; ".join(parts) or None
 
 
@@ -70,11 +74,18 @@ def map_month(month: Month, texts: list[str], packages: dict[str, int], what: st
                 continue
             day = parse_play_date(raw["Transaction Date"])
             if Month.of(day) != month:
-                result.out_of_month_rows += 1
-                continue
+                # Keep the money so the month still reconciles with the payout; move the
+                # row to the nearest day inside the file's month so neighbouring months'
+                # replacements are never touched.
+                day = month.first_day if day < month.first_day else month.last_day
+                result.moved_rows += 1
             app_id = packages.get(raw["Product id"])
             if app_id is None:
                 result.unmapped_rows += 1
+                currency = raw["Merchant Currency"].upper()
+                result.unmapped_amounts[currency] = result.unmapped_amounts.get(
+                    currency, 0.0
+                ) + float(amount)
                 continue
             country = raw["Buyer Country"].upper() or "ZZ"
             key = (day.isoformat(), app_id, country, raw["Merchant Currency"].upper())

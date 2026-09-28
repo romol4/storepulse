@@ -20,7 +20,11 @@ from storepulse.core.sources import (
     play_vitals,
 )
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient, AppleVendorError
-from storepulse.core.sources.google_client import GoogleClient
+from storepulse.core.sources.google_client import (
+    BULK_PERMISSION,
+    FINANCIAL_PERMISSION,
+    GoogleClient,
+)
 from storepulse.core.sources.play_common import Month, decode_csv, plan_month, read_zip_csv
 
 log = logging.getLogger(__name__)
@@ -242,6 +246,9 @@ class PlaySummary:
     already_final: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Nothing could be collected at all, e.g. a prefix that lists no files (usually a
+    # missing permission). Not an ingest status, so reported here instead of the log.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _error(
@@ -326,6 +333,14 @@ def collect_play_installs(
             _error(conn, summary, package, months[-1].first_day.isoformat(), db.utc_now(), exc)
             continue
         files = play_installs.month_files(names, package)
+        if not files:
+            summary.warnings.append(
+                f"no installs files visible for {package} under "
+                f"gs://{bucket}/{play_installs.object_prefix(package)}. New apps take a day or "
+                f"two to appear; otherwise check that the service account has "
+                f"'{BULK_PERMISSION}' for this app."
+            )
+            continue
         for month in months:
             label = f"{package} {month}"
             plan = plan_month(month, set(files), today)
@@ -393,6 +408,16 @@ def _collect_account_months(
     started = db.utc_now()
     try:
         files = month_files([o.name for o in client.list_objects(bucket, prefix)])
+        if not files:
+            # Can't tell "no reports yet" from "not allowed to see them" by listing, and
+            # the usual cause is the optional financial permission, so say so every time.
+            summary.warnings.append(
+                f"no {source} files are visible under gs://{bucket}/{prefix}, so Android "
+                f"revenue can't be collected. Grant the service account "
+                f"'{FINANCIAL_PERMISSION}' (global) in Play Console > Users and permissions "
+                "(see README, 'Google service account')."
+            )
+            return summary
     except Exception as exc:
         _error(conn, summary, prefix, months[-1].first_day.isoformat(), started, exc)
         return summary

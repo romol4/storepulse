@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
@@ -9,7 +10,7 @@ from typing import Literal
 from storepulse.core import db
 from storepulse.core.sources.apple_client import AppleAgreementError, AppleAuthError, AppleClient
 from storepulse.core.sources.apple_sales import sku_key
-from storepulse.core.sources.google_client import GoogleClient
+from storepulse.core.sources.google_client import GoogleClient, GoogleError
 
 DiscoveryStatus = Literal["ok", "permission_denied"]
 
@@ -98,3 +99,38 @@ def register_play_apps(
         db.upsert_app(conn, "android", app["package"], name)
         registered.append((app["package"], name))
     return registered
+
+
+_INSTALLS_OBJECT = re.compile(r"^stats/installs/installs_(.+)_\d{6}_[a-z_]+\.csv$")
+
+
+def packages_in_bucket(client: GoogleClient, bucket: str) -> list[str]:
+    """Packages that have installs files, from the bucket listing alone."""
+    names = (o.name for o in client.list_objects(bucket, "stats/installs/installs_"))
+    return sorted({m.group(1) for n in names if (m := _INSTALLS_OBJECT.match(n))})
+
+
+def refresh_play_apps(
+    client: GoogleClient, conn: sqlite3.Connection, bucket: str
+) -> DiscoveryResult:
+    """Re-run Play discovery so apps launched after setup are collected too.
+
+    Uses the Reporting API's app list; if that fails (API disabled, permission pending),
+    falls back to the packages visible in the bucket's installs files. The fallback only
+    adds unknown packages, so it never renames apps discovered with a display name.
+    """
+    try:
+        return discover_play(client, conn)
+    except GoogleError as exc:
+        reason = str(exc)
+    known = db.apps_for(conn, "android")
+    added = [
+        (package, package) for package in packages_in_bucket(client, bucket) if package not in known
+    ]
+    for package, name in added:
+        db.upsert_app(conn, "android", package, name)
+    return DiscoveryResult(
+        "permission_denied",
+        apps=added,
+        message=f"couldn't list apps with the Reporting API, used the bucket instead: {reason}",
+    )

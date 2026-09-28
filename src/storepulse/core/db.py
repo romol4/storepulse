@@ -19,6 +19,7 @@ METRICS: frozenset[str] = frozenset(
         "uninstalls",
         "active_devices",
         "proceeds",
+        "sales_gross",
         "iap_units",
         "impressions",
         "page_views",

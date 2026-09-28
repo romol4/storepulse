@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import Generic, TypeVar
 
 from storepulse.cli import collect
 from storepulse.cli.checks import Check, CheckResult, check_apple, check_google
@@ -18,12 +20,19 @@ from storepulse.cli.common import (
     ask_positive_int,
     confirm,
     google_client,
+    store_for_run,
     store_for_setup,
 )
 from storepulse.core import config, db, discovery
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
-from storepulse.core.sources.google_client import parse_bucket_uri
+from storepulse.core.sources.google_client import (
+    BULK_PERMISSION,
+    FINANCIAL_PERMISSION,
+    parse_bucket_uri,
+)
 from storepulse.core.sources.play_common import last_months
+
+C = TypeVar("C")
 
 DEFAULT_APPLE_DAYS = 90
 DEFAULT_PLAY_MONTHS = 3
@@ -43,7 +52,35 @@ def _read(path_text: str, what: str) -> tuple[Path, str]:
         raise CliError(f"could not read the {what} at {path}") from None
 
 
-def _setup_apple(env: Env, cfg: config.Config) -> tuple[config.AppleConfig, str, Path, CheckResult]:
+@dataclass
+class Setup(Generic[C]):
+    config: C
+    secret: str
+    path: Path | None  # None when the stored key was reused
+    result: CheckResult
+    clean: bool  # every check passed (not "saved anyway")
+
+
+def _key_source(
+    env: Env, cfg: config.Config, prompt: str, secret_name: str, what: str
+) -> tuple[Path | None, str]:
+    """Read a key file, or reuse the stored key when the user leaves the path blank."""
+    stored_ok = bool(cfg.secret_store) and (
+        (secret_name == APPLE_P8_SECRET and cfg.apple is not None)
+        or (secret_name == GOOGLE_SA_SECRET and cfg.google is not None)
+    )
+    if not stored_ok:
+        return _read(ask(env, prompt), what)
+    answer = env.input(f"{prompt} (Enter to keep the saved key): ").strip()
+    if answer:
+        return _read(answer, what)
+    stored = store_for_run(env, cfg).get(secret_name)
+    if stored is None:
+        raise CliError(f"no saved {what} found; give the path to the file")
+    return None, stored
+
+
+def _setup_apple(env: Env, cfg: config.Config) -> Setup[config.AppleConfig]:
     prev = cfg.apple
     env.say()
     env.say("Apple App Store Connect")
@@ -54,7 +91,7 @@ def _setup_apple(env: Env, cfg: config.Config) -> tuple[config.AppleConfig, str,
         key_id=ask(env, "Key ID", prev.key_id if prev else ""),
         vendor_number=ask(env, "Vendor number", prev.vendor_number if prev else ""),
     )
-    p8_path, p8 = _read(ask(env, "Path to the .p8 key file"), ".p8 file")
+    p8_path, p8 = _key_source(env, cfg, "Path to the .p8 key file", APPLE_P8_SECRET, ".p8 file")
     env.say("Checking the key with App Store Connect...")
     try:
         client = apple_client(env, apple, p8)
@@ -67,18 +104,19 @@ def _setup_apple(env: Env, cfg: config.Config) -> tuple[config.AppleConfig, str,
             report(env, check)
     if result.failed:
         raise CliError(result.failed[0].text)
-    return apple, p8, p8_path, result
+    return Setup(apple, p8, p8_path, result, clean=True)
 
 
-def _setup_google(
-    env: Env, cfg: config.Config
-) -> tuple[config.GoogleConfig, str, Path, CheckResult]:
+def _setup_google(env: Env, cfg: config.Config) -> Setup[config.GoogleConfig]:
     prev = cfg.google
     env.say()
     env.say("Google Play")
-    env.say("You need a service account JSON key invited in Play Console with 'View app")
-    env.say("information and download bulk reports' (README, 'Google service account').")
-    sa_path, raw = _read(ask(env, "Path to the service account JSON key"), "service account key")
+    env.say("You need a service account JSON key invited in Play Console with")
+    env.say(f"'{BULK_PERMISSION}'. Android revenue also needs the optional")
+    env.say(f"'{FINANCIAL_PERMISSION}' (README, 'Google service account').")
+    sa_path, raw = _key_source(
+        env, cfg, "Path to the service account JSON key", GOOGLE_SA_SECRET, "service account key"
+    )
     try:
         sa = load_service_account(raw)
     except GoogleCredentialError as exc:
@@ -94,6 +132,7 @@ def _setup_google(
     for check in result.checks:
         report(env, check)
     failed = result.failed
+    clean = not failed and bool(result.apps)
     if failed:
         if all(c.pending_permission for c in failed):
             env.say(
@@ -105,16 +144,18 @@ def _setup_google(
         else:
             raise CliError(failed[0].text)
     google = config.GoogleConfig(bucket_uri=uri.strip(), service_account_email=sa.client_email)
-    return google, raw, sa_path, result
+    return Setup(google, raw, sa_path, result, clean=clean)
 
 
 def cmd_init(args: argparse.Namespace, env: Env) -> int:
     cfg = config.load()
     env.say("Storepulse setup. Each platform is optional; set up at least one.")
     apple = google = None
-    if confirm(env, "Set up Apple App Store Connect?", default=True):
+    # Default to "no" for a platform that's already set up, so re-running init to add the
+    # other one doesn't walk back through (and ask for the key file of) this one.
+    if confirm(env, "Set up Apple App Store Connect?", default=cfg.apple is None):
         apple = _setup_apple(env, cfg)
-    if confirm(env, "Set up Google Play?", default=True):
+    if confirm(env, "Set up Google Play?", default=cfg.google is None):
         google = _setup_google(env, cfg)
     if apple is None and google is None:
         if cfg.apple is None and cfg.google is None:
@@ -125,11 +166,11 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
     # Every check passed: save.
     store = store_for_setup(env, cfg)
     if apple is not None:
-        store.set(APPLE_P8_SECRET, apple[1])
-        cfg.apple = apple[0]
+        store.set(APPLE_P8_SECRET, apple.secret)
+        cfg.apple = apple.config
     if google is not None:
-        store.set(GOOGLE_SA_SECRET, google[1])
-        cfg.google = google[0]
+        store.set(GOOGLE_SA_SECRET, google.secret)
+        cfg.google = google.config
     cfg.secret_store = store.kind
     cfg_path = config.save(cfg)
     env.say()
@@ -140,16 +181,19 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         env.say(f"  service account fingerprint {store.fingerprint(GOOGLE_SA_SECRET)}")
     env.say(f"Settings saved to: {cfg_path}")
     for saved in (apple, google):
-        if saved is not None:
-            env.say(f"You can now delete {saved[2]}; Storepulse keeps its own copy.")
+        # Only once setup fully worked; after "save anyway" the file may still be needed.
+        if saved is not None and saved.path is not None and saved.clean:
+            env.say(f"You can now delete {saved.path}; Storepulse keeps its own copy.")
+        elif saved is not None and saved.path is not None:
+            env.say(f"Keep {saved.path} until `storepulse doctor` passes.")
 
     conn = db.connect(config.db_path())
     try:
         registered: list[tuple[str, str]] = []
         if apple is not None:
-            registered += discovery.register_apple_apps(conn, apple[3].apps)
+            registered += discovery.register_apple_apps(conn, apple.result.apps)
         if google is not None:
-            registered += discovery.register_play_apps(conn, google[3].apps)
+            registered += discovery.register_play_apps(conn, google.result.apps)
         if registered:
             env.say()
             env.say("Apps found:")

@@ -1,8 +1,9 @@
-"""Play Console sales reports (``sales/salesreport_YYYYMM.zip``): provisional proceeds.
+"""Play Console sales reports (``sales/salesreport_YYYYMM.zip``): provisional gross sales.
 
 Updated daily, so the current month has data. Amounts are item prices (excluding tax)
-in the buyer's currency, before Google's fee: provisional until the month's earnings
-report replaces them (see play_earnings).
+in the buyer's currency, before Google's fee, stored as ``sales_gross`` (never as
+``proceeds``, which is net everywhere). Provisional: the month's earnings report
+replaces these rows when it arrives (see play_earnings).
 """
 
 from __future__ import annotations
@@ -37,13 +38,17 @@ REQUIRED = (
 class MappedMonth:
     rows: list[db.MetricRow]
     unmapped_rows: int = 0
+    unmapped_amounts: dict[str, float] = field(default_factory=dict)
     out_of_month_rows: int = 0
     ignored_statuses: Counter[str] = field(default_factory=Counter)
 
     def note(self) -> str | None:
         parts = []
         if self.unmapped_rows:
-            parts.append(f"{self.unmapped_rows} rows for unknown packages")
+            amounts = ", ".join(
+                f"{cur} {amount:.2f}" for cur, amount in sorted(self.unmapped_amounts.items())
+            )
+            parts.append(f"{self.unmapped_rows} rows for unknown packages ({amounts})")
         if self.out_of_month_rows:
             parts.append(f"{self.out_of_month_rows} rows dated outside the month")
         if self.ignored_statuses:
@@ -86,12 +91,16 @@ def map_month(month: Month, texts: list[str], packages: dict[str, int], what: st
             app_id = packages.get(raw["Product ID"])
             if app_id is None:
                 result.unmapped_rows += 1
+                currency = raw["Currency of Sale"].upper()
+                result.unmapped_amounts[currency] = result.unmapped_amounts.get(
+                    currency, 0.0
+                ) + float(amount)
                 continue
             country = raw["Country of Buyer"].upper() or "ZZ"
             key = (day.isoformat(), app_id, country, raw["Currency of Sale"].upper())
             totals[key] = totals.get(key, Decimal(0)) + amount
     result.rows = [
-        db.MetricRow(day, app_id, country, "proceeds", currency, float(value))
+        db.MetricRow(day, app_id, country, "sales_gross", currency, float(value))
         for (day, app_id, country, currency), value in sorted(totals.items())
         if value != 0
     ]

@@ -108,7 +108,7 @@ def test_init_both_platforms_then_backfill(
     assert cfg.apple is not None and cfg.google is not None
     assert _scalar("SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_sales'") == 33
     assert _scalar("SELECT COUNT(*) FROM daily_metrics WHERE source = 'play_installs'") == 22
-    assert _scalar("SELECT COUNT(*) FROM daily_metrics WHERE source = 'play_earnings'") == 2
+    assert _scalar("SELECT COUNT(*) FROM daily_metrics WHERE source = 'play_earnings'") == 3
     assert _scalar("SELECT COUNT(*) FROM daily_metrics WHERE source = 'play_vitals'") > 0
 
 

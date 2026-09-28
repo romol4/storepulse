@@ -99,8 +99,10 @@ def test_sales_normal(app_id: int) -> None:
         ("2026-09-02", "DE", "EUR"): 1298.00,  # 1,299.00 charged, refund of -1.00 subtracts 1
         ("2026-09-02", "US", "USD"): -4.99,  # refund recorded positive still subtracts
     }
-    assert all(r.metric == "proceeds" for r in mapped.rows)
+    # Gross, provisional: never mixed into net `proceeds`.
+    assert all(r.metric == "sales_gross" for r in mapped.rows)
     assert mapped.unmapped_rows == 1
+    assert "USD 2.99" in (mapped.note() or "")
     assert mapped.out_of_month_rows == 1
     assert mapped.ignored_statuses == {"Cancelled": 1}
 
@@ -132,10 +134,13 @@ def test_earnings_normal_is_net(app_id: int) -> None:
     mapped = _earnings("earnings_202608_1234567890-0.zip", app_id)
     got = {(r.date, r.country, r.currency): round(r.value, 2) for r in mapped.rows}
     assert got == {
+        ("2026-08-01", "US", "USD"): 1.00,  # dated Jul 31: kept, moved to the month's edge
         ("2026-08-03", "US", "USD"): 4.64,  # 4.99 - 0.75 fee + 0.40 tax line
         ("2026-08-17", "DE", "USD"): 8.50,  # 10.00 - 1.50 fee
     }
-    assert mapped.unmapped_rows == 1 and mapped.out_of_month_rows == 1
+    assert mapped.unmapped_rows == 1 and mapped.moved_rows == 1
+    # The unattributed money is reported per currency so the payout can be reconciled.
+    assert "unattributed (no known package): 1 rows, USD 3.00" in (mapped.note() or "")
 
 
 def test_earnings_empty_and_malformed(app_id: int) -> None:
