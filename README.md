@@ -6,14 +6,15 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (Phase 2).** What works today:
+> **Status: early development (Phase 3 — local mode, v0.1).** What works today:
 > - Guided setup (`storepulse init`), credential checks (`storepulse doctor`) and
->   historical loads (`storepulse backfill`) for:
->   - Apple sales
->   - Google Play installs, sales, earnings and vitals
+>   historical loads (`storepulse backfill`) for Apple sales and Google Play installs,
+>   sales, earnings and vitals.
+> - A daily email digest (`storepulse run`, `storepulse digest --dry-run`) and OS-native
+>   scheduling (`storepulse schedule install`).
 >
 > Not built yet:
-> - The daily email, scheduling and the hosted dashboard.
+> - The hosted web dashboard (Phase 4+).
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 
@@ -22,13 +23,19 @@ Play data into a local SQLite database. It works in two modes:
 Requires Python 3.11+ and [pipx](https://pipx.pypa.io/).
 
 ```bash
-# Nothing is on PyPI until v0.1; install from GitHub:
+# Once v0.1 is tagged, `pipx install storepulse` will work directly from PyPI.
+# Until then, install from GitHub:
 pipx install git+https://github.com/romol4/storepulse
 
-storepulse init     # guided setup for Apple and/or Google Play; validates each key
+storepulse init     # guided setup for Apple and/or Google Play and email; validates
+                    # each key and sends a test email before saving
 storepulse doctor   # re-check every saved credential (reads metadata only; the
                     # Apple check requests one day's sales report)
+storepulse run      # collect every configured source, then send the digest
 ```
+
+`init` also asks for a daily run time and offers to install the schedule, so following
+this quickstart end to end — install, `init`, `run` — gets you a received digest.
 
 `init` offers a first backfill. To load more later:
 
@@ -131,6 +138,80 @@ discovery.
 Compare installs like with like: `installs` is Play Console's **User acquisitions**
 and `uninstalls` is **User losses**, not device acquisitions.
 
+## Email and the daily digest
+
+`storepulse run` collects from every source you've set up, then sends one digest email
+covering the 7 days ending on the most recent day with data, compared with the 7 days
+before. `storepulse init` walks you through SMTP setup — host, port, security, username,
+password, from and to addresses — and sends a test email before saving anything.
+
+```bash
+storepulse digest --dry-run                 # print the digest without sending it
+storepulse digest --dry-run --html d.html   # also write the HTML version to a file
+storepulse run                              # collect every source, then send the digest
+storepulse run --no-email                   # collect and build the digest, don't send it
+storepulse run --days 14                    # override how many days to re-pull
+```
+
+Proceeds are shown per currency, with no conversion and no new outbound calls. A
+converted total appears only if you add fixed rates to `config.toml`:
+
+```toml
+[digest]
+display_currency = "USD"
+
+[digest.rates]
+CAD = 0.73
+EUR = 1.09
+```
+
+### SMTP setup
+
+Storepulse sends through your own SMTP server — there's no Storepulse-run mail service.
+
+- **Gmail:** create an [app password](https://myaccount.google.com/apppasswords) (needs
+  2-Step Verification enabled). Host `smtp.gmail.com`, port `587`, security `starttls`,
+  username your full Gmail address, password the 16-character app password.
+- **Fastmail:** Settings → Password & Security → App passwords → create one scoped to
+  SMTP. Host `smtp.fastmail.com`, port `587`, security `starttls`.
+- **Amazon SES:** use the SMTP credentials from the SES console (not your AWS access
+  key). Host is region-specific, e.g. `email-smtp.us-east-1.amazonaws.com`, port `587`,
+  security `starttls`. Your sending identity must be verified first.
+- **Postmark:** host `smtp.postmarkapp.com`, port `587`, security `starttls`; both the
+  username and password are your server's API token.
+
+`storepulse doctor` logs in and sends a NOOP to check the saved credentials without
+sending mail.
+
+### Schedule management
+
+```bash
+storepulse schedule install            # daily at the configured (or default) run time
+storepulse schedule install --time 09:15
+storepulse schedule show               # what's installed, and whether it will actually run
+storepulse schedule remove
+```
+
+| OS | Mechanism |
+| --- | --- |
+| Linux (systemd) | a `systemd --user` timer |
+| Linux (no systemd) | a marked line in your crontab |
+| macOS | a `launchd` agent in `~/Library/LaunchAgents` |
+| Windows | a Task Scheduler task |
+
+A systemd user timer only fires while your session is active unless you linger. If
+`loginctl` reports lingering is off, `schedule install` offers to run
+`loginctl enable-linger $USER` for you — without it, a machine you reach only over SSH
+may silently stop running the job. `schedule show` reports the current state.
+
+If your secrets are in the encrypted file store (no OS keychain available), a scheduled
+run can't prompt for the passphrase. `schedule install` offers to save it into a `0600`
+file in the config directory and points the job at it with `STOREPULSE_PASSPHRASE_FILE`
+(read only by `core/secrets.py`); anyone who can read that file and your secrets file can
+unlock your credentials, so only agree to this on a machine you trust. Declining leaves
+the schedule uninstalled. This isn't yet supported on Windows with the file store — set
+up on a machine where Windows Credential Manager is reachable instead.
+
 ## Where secrets live
 
 - **OS keychain (default):**
@@ -146,7 +227,8 @@ and `uninstalls` is **User losses**, not device acquisitions.
   - Location: `secrets.enc` in the config directory.
   - Encryption: AES-GCM, with a key derived from your passphrase using scrypt.
   - Unlocking: Storepulse prompts for the passphrase. For unattended runs, set
-    `STOREPULSE_PASSPHRASE`.
+    `STOREPULSE_PASSPHRASE`, or let `storepulse schedule install` set up
+    `STOREPULSE_PASSPHRASE_FILE` for you (see "Schedule management").
 
 `storepulse init` prints which store it used. Later commands always use that
 same store. If it isn't reachable, for example the keychain from a session with

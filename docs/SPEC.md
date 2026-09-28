@@ -209,7 +209,7 @@ CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, A
 
 - Every write is `INSERT … ON CONFLICT DO UPDATE`, so re-pulls overwrite and never duplicate.
 - A re-pull for one source and date replaces that source's rows for that date inside one transaction (delete, then insert) so countries that dropped to zero don't linger.
-- Money is stored in the original currency; conversion happens at render time (see Open decisions).
+- Money is stored in the original currency. The digest lists proceeds per currency; a converted total is shown only when `config.toml` sets fixed rates and a display currency (Phase 3 decision — see Open decisions).
 - `country = 'ALL'` rows are written only where the source gives a total; otherwise the renderer sums countries. Per source: `play_installs` writes both, and readers use its `ALL` row and never add the countries to it; `apple_sales` writes no `ALL` rows, so readers sum its countries. Unknown countries are `ZZ`, never `ALL`.
 - Month-based sources replace a whole month per app, or per account for sales and earnings, in one transaction.
 - A row belongs to the source that wrote it. Another source writing the same key fails loudly and changes nothing; it never takes the row over. Provisional `play_sales` rows are the one planned hand-over: `play_earnings` deletes them explicitly in the same transaction.
@@ -238,7 +238,9 @@ The `apps` table gains `display_name`, `pair_key` (links an iOS and Android app 
 
 One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days from every configured source, absorbing store lag and late revisions.
 
-- **Local:** `storepulse schedule install` writes a crontab line (Linux), a launchd agent (macOS), or a Task Scheduler task (Windows); `schedule remove` undoes it. If the machine was asleep at run time, the next run catches up because of the 7-day window.
+- **Local:** `storepulse schedule install` writes a systemd user timer (Linux, `Persistent=true`, falling back to a crontab line when systemd isn't available), a launchd agent (macOS), or a Task Scheduler task (Windows); `schedule remove` undoes it. If the machine was asleep at run time, the next run catches up because of the 7-day window.
+  - A systemd user timer only fires while its session is active unless the user lingers. `schedule install` checks `loginctl show-user … -p Linger` and offers to run `loginctl enable-linger`, since a machine reached only over SSH would otherwise silently stop running the job; `schedule show` reports the current state.
+  - A scheduled run can't prompt for a passphrase, so with the encrypted-file secret store `schedule install` offers to save it into a `0600` file in the config directory and points the job at it with `STOREPULSE_PASSPHRASE_FILE` (read only by `core/secrets.py`); declining leaves the schedule uninstalled. Not yet supported on Windows with the file store — Windows Credential Manager is the expected store there.
 - **Hosted:** an in-process scheduler (APScheduler) in the container; the run time is set in settings. A Run now button triggers an immediate run.
 
 **CLI** (both modes; in Docker via `docker compose exec`)
@@ -270,7 +272,9 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 Sent through the user's own SMTP server (Gmail or Fastmail app password, SES, Postmark, etc.), so no Storepulse-run mail service is needed.
 
 - HTML body with plain-text fallback; charts rendered server-side as small PNG images embedded inline (email clients strip SVG and JavaScript).
-- Contents: yesterday and 7-day totals vs the previous 7 days, per-app rows with a 30-day installs sparkline, proceeds in the chosen currency, vitals warnings, and data freshness per source.
+- **As-of day:** each configured platform's own latest day with loaded data is found independently; the digest's as-of day is the minimum of those. That single date drives the header and every combined figure, so Apple and Play lagging by different amounts never produces mismatched totals. Phase 3 compares the 7 days ending on it with the 7 days before; a separate "yesterday" figure was simplified out for now.
+- Contents: 7-day totals vs the previous 7 days, per-app rows with a 30-day installs sparkline, proceeds listed per currency (no conversion; a converted total appears only when `config.toml`'s `[digest]` section sets fixed rates and a display currency — no new outbound calls), vitals warnings, and data freshness per source.
+- Local mode's `apps` table has no `pair_key` yet (that arrives with hosted mode; see Storage), so an iOS and Android build of the same app are two separate rows — never merged — until then.
 - Optional weekly summary email and optional CSV attachment of the week's data.
 - In hosted mode the email links to the dashboard.
 
@@ -283,7 +287,7 @@ Vitals    billFT Android crash rate 1.4% ⚠
 Data      apple_sales ok · play_installs ok (Sep 22) · vitals ok
 ```
 
-Warnings: crash rate above 1.09% or ANR rate above 0.47% (Google Play's bad-behavior thresholds, configurable), a source erroring, or data older than 4 days.
+Warnings: the 28-day crash rate above 1.09% or the 28-day ANR rate above 0.47% (Google Play's bad-behavior thresholds, configurable; daily rates are shown for information only and never trigger a warning), a source erroring, or a source overdue per its cadence (Scheduling and reliability).
 
 ### Web dashboard (hosted only)
 
@@ -358,7 +362,7 @@ For every phase: parser unit tests against scrubbed sample reports in `tests/fix
 ## Open decisions
 
 - [ ] **Revenue source.** Store reports for everything (simpler, messier for subscriptions) or stores for installs and vitals plus RevenueCat for revenue (cleaner MRR, trials, churn; one more key).
-- [ ] **Currency conversion.** Convert at render time with a daily ECB reference rate cached in `kv` (current draft), or at ingest into one currency chosen at setup.
+- [x] **Currency conversion** (Phase 3). Proceeds are shown per currency, with no conversion and no new outbound calls (no daily reference rate lookup). A converted total is shown only if the user sets fixed rates and a display currency in `config.toml`'s `[digest]` section.
 - [ ] **Language.** Python (current draft: mature JWT, GCS, keyring, and web libraries; `pipx` install) or Go for a single static binary that non-Python users install more easily.
 - [ ] **License.** Apache-2.0 (current draft) or MIT for maximum adoption, or AGPL-3.0 if anyone running a modified version as a public service should have to share their changes. This also affects whether LogicFT could later sell a managed, per-customer-isolated hosted version.
 - [ ] **Name.** Storepulse is a placeholder; check PyPI, GitHub, and trademark conflicts before the first public release.

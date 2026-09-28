@@ -226,3 +226,4 @@ storepulse.db-*
 secrets.enc
 keychain-wrapped.json
 config.toml
+run-passphrase
