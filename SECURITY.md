@@ -34,4 +34,9 @@ receives fixes.
   - Your own SMTP server.
   - No telemetry, no version checks.
 - **What API keys it asks for:**
-  - Setup guides request read-only roles only (Sales and Reports on Apple).
+  - Setup guides request read-only roles only: Sales and Reports on Apple, and
+    *View app information and download bulk reports* on Google Play.
+  - Android revenue optionally needs Play's *View financial data, orders, and
+    cancellation survey responses*, which also exposes order details and buyers'
+    city, state and postcode. Storepulse keeps only the buyer's country, and works
+    without that permission (no Android revenue).

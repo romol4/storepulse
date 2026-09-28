@@ -26,7 +26,8 @@ Requires Python 3.11+ and [pipx](https://pipx.pypa.io/).
 pipx install git+https://github.com/romol4/storepulse
 
 storepulse init     # guided setup for Apple and/or Google Play; validates each key
-storepulse doctor   # re-check every saved credential at any time (pulls no data)
+storepulse doctor   # re-check every saved credential (reads metadata only; the
+                    # Apple check requests one day's sales report)
 ```
 
 `init` offers a first backfill. To load more later:
@@ -34,7 +35,7 @@ storepulse doctor   # re-check every saved credential at any time (pulls no data
 ```bash
 storepulse backfill --source apple_sales --days 90
 storepulse backfill --source play_installs --months 12
-storepulse backfill --source play_sales --months 3      # provisional proceeds
+storepulse backfill --source play_sales --months 3      # provisional gross sales
 storepulse backfill --source play_earnings --months 12  # final proceeds
 storepulse backfill --source play_vitals --days 30
 ```
@@ -50,11 +51,13 @@ Limits:
   are skipped with a warning.
 - Play months before the first report file are skipped silently.
 
-**Android proceeds come in two stages:**
-- The sales report updates daily. It gives a *provisional* figure: the item price
-  before Google's fee, in the buyer's currency.
-- The monthly earnings report replaces it with *final* net proceeds. That report
+**Android revenue comes in two stages:**
+- The sales report updates daily. It gives *provisional* gross sales (`sales_gross`):
+  the item price before Google's fee, in the buyer's currency. It is never mixed into
+  `proceeds`, which is net everywhere.
+- The monthly earnings report replaces it with *final* net `proceeds`. That report
   arrives early in the following month.
+- Both need the optional financial permission (see "Google service account").
 
 ## Apple API key
 
@@ -100,18 +103,29 @@ from the Play Developer Reporting API, using one service account:
 2. **Grant it access in Play Console.** Go to Users and permissions → Invite new users.
    - Enter the service account's email.
    - Under account permissions, grant **View app information and download bulk
-     reports (read-only)** for all apps.
+     reports (read-only)** for all apps. This is required: installs and vitals.
+   - **Optional, for Android revenue only:** also grant **View financial data,
+     orders, and cancellation survey responses**, set to *Global*. Without it
+     everything else works; sales and earnings are skipped and `storepulse doctor`
+     says so.
    - New service accounts can take **24–48 hours** before Play permissions work.
      `storepulse doctor` tells you when they do.
 3. **Copy the bucket URI.** In Play Console, go to Download reports → Statistics →
    **Copy Cloud Storage URI**. It looks like `gs://pubsite_prod_1234567890/`.
 
 What the service account can and can't do:
-- **Can:** read the installs, sales and earnings reports, and read vitals.
+- **Can:** read the installs reports and vitals. With the optional financial
+  permission it can also read the sales and earnings reports, and see order details
+  in Play Console, including each buyer's city, state and postcode. Storepulse keeps
+  only the buyer's country from those reports.
 - **Cannot:** publish, change store listings, reply to reviews or manage users.
 
-After setup you can delete the JSON file, because Storepulse keeps its own copy in
-the secret store.
+Once `storepulse init` (or `storepulse doctor`) shows your apps, you can delete the
+JSON file, because Storepulse keeps its own copy in the secret store. To change other
+settings later, run `init` again and press Enter at the key path to keep the saved key.
+
+New apps are picked up automatically: every Play backfill, and `doctor`, re-runs app
+discovery.
 
 Compare installs like with like: `installs` is Play Console's **User acquisitions**
 and `uninstalls` is **User losses**, not device acquisitions.
