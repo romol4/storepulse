@@ -150,3 +150,158 @@ FT_APPS = [
 ]
 
 TODAY = date(2026, 9, 27)
+
+
+# -- Google ---------------------------------------------------------------------------------
+
+PLAY_FIXTURES = FIXTURES / "play"
+PKG = "com.example.billft"
+BUCKET = "pubsite_prod_1234567890"
+TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+
+def play_bytes(name: str) -> bytes:
+    return (PLAY_FIXTURES / name).read_bytes()
+
+
+@pytest.fixture(scope="session")
+def rsa_pem() -> str:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+
+@pytest.fixture(scope="session")
+def sa_json(rsa_pem: str) -> str:
+    return json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "storepulse-test",
+            "private_key_id": "abc123",
+            "private_key": rsa_pem,
+            "client_email": "reports@storepulse-test.iam.gserviceaccount.com",
+            "client_id": "1234567890",
+            "token_uri": TOKEN_URI,
+        }
+    )
+
+
+def google_error(status: int, message: str = "denied") -> httpx.Response:
+    return httpx.Response(
+        status, json={"error": {"code": status, "message": message, "status": "DENIED"}}
+    )
+
+
+@dataclass
+class FakeGoogle:
+    """Mock token endpoint, GCS JSON API and Play Developer Reporting API."""
+
+    objects: dict[str, bytes] = field(default_factory=dict)
+    apps: list[dict[str, str]] = field(
+        default_factory=lambda: [{"packageName": PKG, "displayName": "billFT"}]
+    )
+    token_status: int = 200
+    gcs_status: int = 200
+    reporting_status: int = 200
+    freshness: dict[str, object] | None = None
+    queries: dict[str, dict[str, object]] = field(default_factory=dict)
+    requests: list[httpx.Request] = field(default_factory=list)
+    tokens_issued: int = 0
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        host, path = request.url.host, request.url.path
+        if host == "oauth2.googleapis.com":
+            if self.token_status != 200:
+                return httpx.Response(
+                    self.token_status,
+                    json={"error": "invalid_grant", "error_description": "Invalid JWT Signature."},
+                )
+            self.tokens_issued += 1
+            return httpx.Response(
+                200, json={"access_token": f"ya29.fake-{self.tokens_issued}", "expires_in": 3599}
+            )
+        if host == "storage.googleapis.com":
+            if self.gcs_status != 200:
+                return google_error(self.gcs_status)
+            prefix = f"/storage/v1/b/{BUCKET}/o"
+            if path == prefix:
+                want = request.url.params.get("prefix", "")
+                items = [
+                    {"name": n, "size": str(len(b))}
+                    for n, b in sorted(self.objects.items())
+                    if n.startswith(want)
+                ]
+                return httpx.Response(200, json={"items": items})
+            if path.startswith(prefix + "/"):
+                from urllib.parse import unquote
+
+                name = unquote(path[len(prefix) + 1 :])
+                if name in self.objects:
+                    return httpx.Response(200, content=self.objects[name])
+                return google_error(404, "No such object")
+            return google_error(404, "bucket not found")
+        if host == "playdeveloperreporting.googleapis.com":
+            if self.reporting_status != 200:
+                return google_error(self.reporting_status)
+            if path == "/v1beta1/apps:search":
+                return httpx.Response(200, json={"apps": self.apps})
+            for metric_set in ("crashRateMetricSet", "anrRateMetricSet"):
+                base = f"/v1beta1/apps/{PKG}/{metric_set}"
+                if path == base:
+                    return httpx.Response(
+                        200, json=self.freshness or json.loads(play_bytes("vitals_freshness.json"))
+                    )
+                if path == base + ":query":
+                    default = (
+                        "vitals_crash_query.json"
+                        if "crash" in metric_set.lower()
+                        else ("vitals_anr_query.json")
+                    )
+                    body = self.queries.get(metric_set) or json.loads(play_bytes(default))
+                    return httpx.Response(200, json=body)
+            return google_error(404, "not found")
+        return httpx.Response(599)
+
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handler)
+
+    def downloads(self) -> list[str]:
+        from urllib.parse import unquote
+
+        return [
+            unquote(r.url.path.rsplit("/o/", 1)[1])
+            for r in self.requests
+            if r.url.host == "storage.googleapis.com" and "/o/" in r.url.path
+        ]
+
+
+def standard_objects() -> dict[str, bytes]:
+    """The synthetic bucket: September installs + sales, August earnings."""
+    return {
+        f"stats/installs/installs_{PKG}_202609_overview.csv": play_bytes(
+            f"installs_{PKG}_202609_overview.csv"
+        ),
+        f"stats/installs/installs_{PKG}_202609_country.csv": play_bytes(
+            f"installs_{PKG}_202609_country.csv"
+        ),
+        "sales/salesreport_202609.zip": play_bytes("salesreport_202609.zip"),
+        "earnings/earnings_202608_1234567890-0.zip": play_bytes("earnings_202608_1234567890-0.zip"),
+    }
+
+
+def router(apple: FakeApple | None = None, google: FakeGoogle | None = None) -> httpx.MockTransport:
+    """One transport serving both fakes, dispatched by host."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.appstoreconnect.apple.com":
+            return apple.handler(request) if apple else httpx.Response(599)
+        return google.handler(request) if google else httpx.Response(599)
+
+    return httpx.MockTransport(handle)
