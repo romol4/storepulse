@@ -46,9 +46,16 @@ class AppleConfig:
 
 
 @dataclass
+class GoogleConfig:
+    bucket_uri: str
+    service_account_email: str
+
+
+@dataclass
 class Config:
     secret_store: str = ""
     apple: AppleConfig | None = None
+    google: GoogleConfig | None = None
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -75,6 +82,15 @@ def load(path: Path | None = None) -> Config:
             )
         except KeyError as exc:
             raise ConfigError(f"{path}: [apple] is missing {exc.args[0]!r}") from None
+    google = raw.pop("google", None)
+    if isinstance(google, dict):
+        try:
+            cfg.google = GoogleConfig(
+                bucket_uri=str(google["bucket_uri"]),
+                service_account_email=str(google["service_account_email"]),
+            )
+        except KeyError as exc:
+            raise ConfigError(f"{path}: [google] is missing {exc.args[0]!r}") from None
     cfg.extra = raw
     return cfg
 
@@ -96,6 +112,13 @@ def dumps(cfg: Config) -> str:
             f"issuer_id = {_toml_str(cfg.apple.issuer_id)}",
             f"key_id = {_toml_str(cfg.apple.key_id)}",
             f"vendor_number = {_toml_str(cfg.apple.vendor_number)}",
+        ]
+    if cfg.google is not None:
+        lines += [
+            "",
+            "[google]",
+            f"bucket_uri = {_toml_str(cfg.google.bucket_uri)}",
+            f"service_account_email = {_toml_str(cfg.google.service_account_email)}",
         ]
     return "\n".join(lines) + "\n"
 
