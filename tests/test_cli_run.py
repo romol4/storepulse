@@ -136,6 +136,38 @@ def test_run_missing_apple_key_is_a_clear_error(memory_keyring: object, p8_file:
     assert "no Apple key found" in _err(env)
 
 
+def test_secrets_never_leak_through_a_failing_run(
+    memory_keyring: object, p8_file: Path, p8_pem: str
+) -> None:
+    """Broad redaction sweep: a real credential, registered for real during init, must
+    never reach stdout, stderr, or the SQLite database — even when an upstream error's
+    detail text happens to echo it back (e.g. a misbehaving proxy reflecting the request).
+    """
+    _init_apple_and_email(p8_file)
+    # A 5xx is what actually carries the response body's detail text into the raised
+    # error's message (after redaction); a 401's message is a fixed, generic string that
+    # never echoes the response body, so it wouldn't exercise redaction at all.
+    leaking_detail = f"upstream failure; request context included: {p8_pem}"
+    broken = FakeApple(
+        sales={YESTERDAY.isoformat(): lambda: apple_error(500, leaking_detail, "SERVER_ERROR")}
+    )
+    env = _env(apple=broken, smtp=FakeSMTP())
+    assert main(["run", "--days", "1"], env) == 1
+
+    console = _out(env) + _err(env)
+    assert p8_pem not in console
+    assert "[REDACTED]" in console
+
+    conn = db.connect(config.db_path())
+    try:
+        errors = " ".join(
+            row["error"] or "" for row in conn.execute("SELECT error FROM ingest_log")
+        )
+    finally:
+        conn.close()
+    assert p8_pem not in errors
+
+
 def test_run_uses_configured_days_by_default(memory_keyring: object, p8_file: Path) -> None:
     _init_apple_and_email(p8_file)
     cfg = config.load()
