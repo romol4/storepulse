@@ -8,7 +8,8 @@ from __future__ import annotations
 import io
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from email.message import EmailMessage
 from pathlib import Path
 
 import pyotp
@@ -40,6 +41,7 @@ SMTP_PASSWORD = "smtp-app-password-123"
 class FakeSMTP:
     sent: int = 0
     fail_login: bool = False
+    sent_messages: list[EmailMessage] = field(default_factory=list)
 
     def starttls(self, *, context: object = None) -> tuple[int, bytes]:
         return (220, b"ok")
@@ -51,8 +53,11 @@ class FakeSMTP:
             raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
         return (235, b"ok")
 
-    def send_message(self, msg: object, from_addr: object, to_addrs: object) -> dict[str, object]:
+    def send_message(
+        self, msg: EmailMessage, from_addr: object, to_addrs: object
+    ) -> dict[str, object]:
         self.sent += 1
+        self.sent_messages.append(msg)
         return {}
 
     def noop(self) -> tuple[int, bytes]:
@@ -237,6 +242,30 @@ def test_login_logout(site: Site) -> None:
     assert site.client.post("/logout", data={}).status_code == 403
     assert site.client.post("/logout", data={"csrf": site.csrf("/")}).status_code == 303
     assert site.client.get("/").headers["location"] == "/login"
+
+
+def test_login_email_is_case_insensitive(site: Site) -> None:
+    # The one hosted admin account must never be lockable out by autocapitalize or a
+    # differently-cased retype: setup and login normalize email the same way.
+    csrf = site.csrf("/setup")
+    response = site.client.post(
+        "/setup",
+        data={
+            "csrf": csrf,
+            "token": site.setup_token,
+            "email": "Admin@Example.COM",
+            "password": PASSWORD,
+            "confirm": PASSWORD,
+        },
+    )
+    assert response.status_code == 303, response.text
+    site.client.cookies.clear()
+    csrf = site.csrf("/login")
+    response = site.client.post(
+        "/login", data={"csrf": csrf, "email": "admin@example.com", "password": PASSWORD}
+    )
+    assert response.status_code == 303, response.text
+    assert response.headers["location"] == "/"
 
 
 def test_session_cookie_flags(site: Site) -> None:
@@ -507,6 +536,38 @@ def test_run_now_collects_pairs_and_emails(site: Site, p8_pem: str, sa_json: str
     assert "billFT" in overview and "iOS + Android" in overview
     sources = site.client.get("/sources").text
     assert "apple_sales ok" in sources
+
+
+def test_a_pair_first_valid_this_run_is_still_in_this_run_s_email(
+    site: Site, p8_pem: str, sa_json: str
+) -> None:
+    # save_apple/save_google already pair eagerly on save, so by itself this fixture
+    # wouldn't catch a regression in when Jobs._run re-evaluates pairing. Reset billFT to
+    # undecided first, the state a store-side rename would leave, so pairing can only be
+    # (re-)established as part of the run this test triggers.
+    _setup_admin(site)
+    _save_apple(site, p8_pem)
+    _save_google(site, sa_json)
+    _save_email(site)
+    conn = db.connect(config.db_path())
+    conn.execute("UPDATE apps SET pair_key = NULL, pair_source = NULL WHERE name = 'billFT'")
+    conn.close()
+
+    jobs = site.client.app.state.hosted.jobs  # type: ignore[attr-defined]
+    site.client.post("/sources/run", data={"csrf": site.csrf("/sources")})
+    for _ in range(600):  # the job runs on a worker thread
+        if jobs.status.running is None and jobs.status.last_label:
+            break
+        import time
+
+        time.sleep(0.05)
+    assert jobs.status.last_label == "Run now"
+    assert site.smtp.sent_messages, "no email was sent"
+    body = site.smtp.sent_messages[-1].get_body(preferencelist=("plain",))
+    assert body is not None
+    # Pairing must run before this run's own digest is built, not only before the next
+    # page view, or a pair that first becomes valid this run ships as two rows by email.
+    assert "billFT (iOS + Android)" in body.get_content()
 
 
 def test_app_page_shows_platforms_side_by_side(site: Site, p8_pem: str, sa_json: str) -> None:

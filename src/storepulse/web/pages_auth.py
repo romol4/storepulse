@@ -94,7 +94,7 @@ def setup_submit(
                 {**form, "error": "That setup token isn't right. Copy it from the container log."},
                 403,
             )
-        email = email.strip()
+        email = email.strip().casefold()
         if "@" not in email:
             return _anon_page(
                 request, "setup.html", {**form, "error": "Enter an email address."}, 400
@@ -125,8 +125,8 @@ def login_submit(
     request: Request, csrf: FormStr = "", email: FormStr = "", password: FormStr = ""
 ) -> Response:
     state = hosted(request)
-    email = email.strip()
-    keys = [f"ip:{client_ip(request)}", f"user:{email.casefold()}"]
+    email = email.strip().casefold()
+    keys = [f"ip:{client_ip(request)}", f"user:{email}"]
     form = {"email": email}
     if blocked := _throttled(request, "login.html", keys, form):
         return blocked

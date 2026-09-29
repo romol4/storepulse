@@ -100,6 +100,11 @@ class Jobs:
                 store, cfg, transport=self.deps.transport, sleep=self.deps.sleep
             )
             base_url = db.get_settings(conn).get("hosted.base_url") or None
+            # Re-evaluate pairing before this run's own digest is built, so a pair that's
+            # already discovered but not yet paired (e.g. a store rename) is merged in
+            # today's email too, not just from tomorrow's run onward. Collection can still
+            # discover brand-new apps below, so pair again after for those.
+            discovery.pair_apps(conn)
             result = runner.run_all(
                 conn,
                 cfg,
