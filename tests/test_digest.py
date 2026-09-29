@@ -340,6 +340,34 @@ def test_daily_source_overdue_after_stale_days(conn: sqlite3.Connection, ios_id:
     assert "apple_sales not_ready" in result.text
 
 
+def test_subscriptions_hidden_until_seen(conn: sqlite3.Connection, ios_id: int) -> None:
+    """Unlike apple_sales, apple_subscriptions/apple_subscription_events only join the
+    Data line once ingest_log has actually seen them (not every app has subscriptions)."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_subscriptions" not in result.text
+    assert "apple_subscription_events" not in result.text
+
+
+def test_subscriptions_shown_once_seen(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "apple_subscriptions", AS_OF.isoformat())
+    _log(conn, "apple_subscription_events", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_subscriptions ok" in result.text
+    assert "apple_subscription_events ok" in result.text
+
+
+def test_subscriptions_overdue_after_stale_days(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, "2026-09-20", ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", "2026-09-20")
+    _log(conn, "apple_subscriptions", "2026-09-20")
+    result = digest.build_digest(conn, _cfg(google=None), today=date(2026, 9, 27))
+    assert "apple_subscriptions not_ready" in result.text
+
+
 def test_august_earnings_on_sep_3_not_flagged(conn: sqlite3.Connection, android_id: int) -> None:
     _android_installs_day(conn, "2026-09-01", android_id, installs=1)
     _log(conn, "play_installs", "2026-09-01")
