@@ -66,3 +66,33 @@ jobs:
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build
+        run: docker build -f docker/Dockerfile -t storepulse:ci .
+      - name: Refuses to start without a master key
+        run: |
+          if docker run --rm storepulse:ci > out.txt 2>&1; then
+            echo "started without a master key"; exit 1
+          fi
+          grep -q "no master key" out.txt
+      - name: Starts, reports healthy and prints a setup token
+        run: |
+          docker run -d --name sp -e STOREPULSE_MASTER_KEY="$(openssl rand -base64 48)" \
+            -p 127.0.0.1:8000:8000 storepulse:ci
+          for i in $(seq 1 60); do
+            [ "$(docker inspect sp --format '{{.State.Health.Status}}')" = healthy ] && break
+            sleep 1
+          done
+          docker inspect sp --format '{{.State.Health.Status}}' | grep -qx healthy
+          curl -fsS http://127.0.0.1:8000/healthz
+          docker logs sp 2>&1 | grep -q "setup token:"
+          [ "$(docker exec sp id -u)" = 10001 ]
+          [ "$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:8000/)" = "http://127.0.0.1:8000/setup" ]
+      - name: Container logs
+        if: always()
+        run: docker logs sp 2>&1 | grep -v "setup token" || true

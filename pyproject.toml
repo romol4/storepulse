@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "storepulse"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pull your App Store Connect and Google Play stats into SQLite and get a daily digest."
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,6 +30,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Hosted mode (docs/SPEC.md, Phase 4): `pip install "storepulse[web]"`, or the Docker image.
+# Local mode never needs these, so `pipx install storepulse` stays small.
+web = [
+    "fastapi>=0.118,<1",             # web framework
+    "uvicorn>=0.37,<1",              # ASGI server for `storepulse serve`
+    "jinja2>=3.1,<4",                # server-rendered pages
+    "python-multipart>=0.0.20,<1",   # form posts and key-file uploads
+    "argon2-cffi>=25.1,<26",         # argon2id admin password (spec)
+    "pyotp>=2.9,<3",                 # optional TOTP (spec)
+    "apscheduler>=3.11,<4",          # in-process daily scheduler (spec)
+]
 dev = [
     "mypy>=2.3,<3",
     "pytest>=9.1,<10",
@@ -65,6 +76,10 @@ strict = true
 python_version = "3.11"
 mypy_path = "src"
 files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["apscheduler.*"]  # ships no type information
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

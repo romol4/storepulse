@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Sources · Storepulse{% endblock %}
+{% block content %}
+<h1>Sources</h1>
+{% if started %}<p class="notice" role="status">{{ started }} Refresh this page to see when it finishes.</p>{% endif %}
+{% if busy %}<p class="error" role="alert">Another job is still running; try again when it finishes.</p>{% endif %}
+<section class="card">
+  <h2>Freshness</h2>
+  {% if statuses %}
+  <table>
+    <tbody>
+    {% for source, text in statuses %}<tr><th>{{ source }}</th><td>{{ text }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">Nothing collected yet.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Runs</h2>
+  <p>{% if job.running %}<strong>Running:</strong> {{ job.running }}.{% else %}Idle.{% endif %}
+    {% if next_run %} Next daily run: {{ next_run }}.{% endif %}</p>
+  {% if job.last_label %}
+    <p>Last: {{ job.last_label }}, finished {{ job.last_finished }}{% if job.last_email %} · email: {{ job.last_email }}{% endif %}.</p>
+    {% if job.last_errors %}<ul class="errors">{% for e in job.last_errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+  <form method="post" action="/sources/run" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" {% if job.running %}disabled{% endif %}>Run now</button>
+  </form>
+  <form method="post" action="/sources/backfill" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Apple days <input name="apple_days" type="number" min="0" max="365" value="90"></label>
+    <label>Play months <input name="play_months" type="number" min="0" max="24" value="3"></label>
+    <button type="submit" class="secondary" {% if job.running %}disabled{% endif %}>Load history</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Recent errors</h2>
+  {% if errors %}
+  <table>
+    <thead><tr><th>Source</th><th>Report</th><th>When</th><th>Error</th></tr></thead>
+    <tbody>{% for source, report, when, note in errors %}<tr><td>{{ source }}</td><td>{{ report }}</td><td>{{ when }}</td><td class="wrap">{{ note }}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% else %}<p class="muted">None.</p>{% endif %}
+</section>
+{% endblock %}

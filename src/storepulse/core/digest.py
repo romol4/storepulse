@@ -86,6 +86,9 @@ class Window:
     end: date
 
 
+_PLATFORM_LABELS = {"ios": "iOS", "android": "Android", "paired": "iOS + Android"}
+
+
 @dataclass
 class AppRow:
     app_id: int
@@ -101,6 +104,13 @@ class AppRow:
     anr_rate_28d: float | None = None
     store_id: str = ""
     prev_installs: float = 0.0
+    hidden: bool = False
+    pair_key: str | None = None
+    series: list[float] = field(default_factory=list)  # daily installs, oldest first
+
+    @property
+    def platform_label(self) -> str:
+        return _PLATFORM_LABELS[self.platform]
 
     @property
     def active(self) -> bool:
@@ -159,6 +169,11 @@ def _format_money(currency: str, amount: float) -> str:
     if symbol is not None:
         return f"{symbol}{amount:,.2f}"
     return f"{amount:,.2f} {currency}".strip()
+
+
+def format_money(currency: str, amount: float) -> str:
+    """Public: the hosted dashboard formats money exactly like the digest."""
+    return _format_money(currency, amount)
 
 
 def _installs_text(count: float) -> str:
@@ -357,10 +372,16 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
 
 
 def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> list[AppRow]:
-    apps = conn.execute("SELECT id, name, platform, store_id FROM apps ORDER BY name").fetchall()
+    """One row per app (never merged here; see _merge_pairs). A user's display name
+    replaces the store name when set (hosted mode's Settings)."""
+    apps = conn.execute(
+        "SELECT id, name, display_name, platform, store_id, hidden, pair_key FROM apps "
+        "ORDER BY name"
+    ).fetchall()
     rows: list[AppRow] = []
     for record in apps:
-        app_id, name, platform = int(record["id"]), str(record["name"]), str(record["platform"])
+        app_id, platform = int(record["id"]), str(record["platform"])
+        name = str(record["display_name"] or record["name"])
         source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
         all_only = platform == "android"
         # The 30-day sparkline series ends on as_of, so it already holds both 7-day
@@ -383,6 +404,9 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             sparkline_png=charts.render_sparkline(series),
             store_id=str(record["store_id"]),
             prev_installs=prev_installs,
+            hidden=bool(record["hidden"]),
+            pair_key=record["pair_key"],
+            series=series,
         )
         if platform == "android":
             row.crash_rate = _latest_vitals(conn, app_id, "crash_rate", as_of)
@@ -402,6 +426,54 @@ def _disambiguate(rows: list[AppRow]) -> None:
     for row in rows:
         if seen[(row.name, row.platform)] > 1:
             row.name = f"{row.name} [{row.store_id}]"
+
+
+def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
+    """Combine each iOS + Android pair (same ``pair_key``, hosted mode only) into one row.
+
+    Per docs/SPEC.md (Build phases, Phase 4): "sum" metrics add across the pair, money
+    per currency and never converted; vitals stay per platform (the merged row carries the
+    Android member's rates, and warnings are computed on the unmerged rows). Callers pass
+    only listable rows, so a hidden member is already gone and its partner stays alone.
+    """
+    groups: dict[str, list[AppRow]] = {}
+    for row in rows:
+        if row.pair_key:
+            groups.setdefault(row.pair_key, []).append(row)
+    merged: list[AppRow] = []
+    done: set[str] = set()
+    for row in rows:
+        members = groups.get(row.pair_key or "", [])
+        if len(members) != 2 or {m.platform for m in members} != {"ios", "android"}:
+            merged.append(row)
+            continue
+        if row.pair_key in done:
+            continue
+        done.add(row.pair_key or "")
+        ios = next(m for m in members if m.platform == "ios")
+        android = next(m for m in members if m.platform == "android")
+        series = [a + b for a, b in zip(ios.series, android.series, strict=True)]
+        merged.append(
+            AppRow(
+                app_id=ios.app_id,
+                name=ios.name,
+                platform="paired",
+                installs=ios.installs + android.installs,
+                proceeds=_merge_currency(ios.proceeds, android.proceeds),
+                sparkline_cid=f"pair{ios.app_id}",
+                sparkline_png=charts.render_sparkline(series),
+                crash_rate=android.crash_rate,
+                crash_rate_28d=android.crash_rate_28d,
+                anr_rate=android.anr_rate,
+                anr_rate_28d=android.anr_rate_28d,
+                store_id=f"{ios.store_id} + {android.store_id}",
+                prev_installs=ios.prev_installs + android.prev_installs,
+                pair_key=ios.pair_key,
+                series=series,
+            )
+        )
+    merged.sort(key=lambda r: (-r.installs, r.name))
+    return merged
 
 
 def _platform_has_data(conn: sqlite3.Connection, platform: str) -> bool:
@@ -582,6 +654,24 @@ def _source_status_text(
     return f"{label} ok{note}"
 
 
+def source_statuses(
+    conn: sqlite3.Connection, cfg: config.Config, today: date | None = None
+) -> list[tuple[str, str]]:
+    """(source, status text) per configured source, exactly as the digest's Data line
+    words it; the hosted Sources page shows the same list."""
+    today = today if today is not None else apple_sales.pacific_today()
+    as_of = compute_as_of(conn, cfg) or today
+    return [
+        (
+            source,
+            _source_status_text(
+                conn, source, today, as_of, cfg.digest.stale_days, cfg.schedule.days
+            ),
+        )
+        for source in _configured_sources(conn, cfg)
+    ]
+
+
 def _data_line(conn: sqlite3.Connection, cfg: config.Config, today: date, as_of: date) -> str:
     sources = _configured_sources(conn, cfg)
     if not sources:
@@ -661,7 +751,7 @@ def _render_text(ctx: _Context) -> str:
         lines.append("")
         lines.append("Apps")
         for row in ctx.app_rows:
-            platform_label = "iOS" if row.platform == "ios" else "Android"
+            platform_label = row.platform_label
             proceeds_text = (
                 ", ".join(_format_money(c, row.proceeds[c]) for c in sorted(row.proceeds))
                 if row.proceeds
@@ -686,7 +776,7 @@ def _render_html(ctx: _Context) -> str:
 
     rows_html = []
     for row in ctx.app_rows:
-        platform_label = "iOS" if row.platform == "ios" else "Android"
+        platform_label = row.platform_label
         proceeds_text = (
             ", ".join(_format_money(c, row.proceeds[c]) for c in sorted(row.proceeds))
             if row.proceeds
@@ -698,9 +788,8 @@ def _render_html(ctx: _Context) -> str:
         # confidence, and crash/ANR are queried as two separate metric sets. Gating on
         # crash_rate_28d alone would hide real, valid ANR data on a day crash_rate_28d
         # is absent (or vice versa).
-        if row.platform == "android" and (
-            row.crash_rate_28d is not None or row.anr_rate_28d is not None
-        ):
+        # (iOS rows carry no vitals; a paired row carries its Android member's.)
+        if row.crash_rate_28d is not None or row.anr_rate_28d is not None:
             # A rate Google withheld is shown as "—", never as 0.0%: a missing crash
             # rate must not read as a perfectly stable app.
             vitals_text = (
@@ -788,8 +877,14 @@ def _empty_digest() -> Digest:
 
 
 def build_digest(
-    conn: sqlite3.Connection, cfg: config.Config, *, today: date | None = None
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    *,
+    today: date | None = None,
+    dashboard_url: str | None = None,
 ) -> Digest:
+    """``dashboard_url`` (hosted mode) adds a link to the dashboard (docs/SPEC.md,
+    Outputs: "In hosted mode the email links to the dashboard")."""
     today = today if today is not None else apple_sales.pacific_today()
     as_of = compute_as_of(conn, cfg)
     if as_of is None:
@@ -806,10 +901,13 @@ def build_digest(
         if configured is not None and not _platform_has_data(conn, platform)
     )
     all_rows = _build_app_rows(conn, as_of, window)
-    # Apps of a platform without data are left out (the Data line says why); apps with
-    # nothing in either week are collapsed into one "+N more" line.
-    app_rows = [r for r in all_rows if r.platform not in unavailable and r.active]
-    quiet_apps = sum(1 for r in all_rows if r.platform not in unavailable and not r.active)
+    # Listed: not hidden (docs/SPEC.md, Storage: hidden apps leave every list but still
+    # count in totals and warnings), and not on a platform without data (the Data line
+    # says why). Pairs merge into one row; apps with nothing in either week collapse
+    # into one "+N more" line.
+    listable = _merge_pairs([r for r in all_rows if not r.hidden and r.platform not in unavailable])
+    app_rows = [r for r in listable if r.active]
+    quiet_apps = sum(1 for r in listable if not r.active)
     ctx = _Context(
         as_of=as_of,
         cfg=cfg,
@@ -829,10 +927,16 @@ def build_digest(
         unavailable=unavailable,
         quiet_apps=quiet_apps,
     )
+    text, html = _render_text(ctx), _render_html(ctx)
+    if dashboard_url:
+        text += f"\nDashboard: {dashboard_url}\n"
+        html = html.removesuffix("</div>") + (
+            f'<p><a href="{_html_escape(dashboard_url)}">Open the dashboard</a></p></div>'
+        )
     return Digest(
         as_of=as_of,
-        text=_render_text(ctx),
-        html=_render_html(ctx),
+        text=text,
+        html=html,
         images=[(row.sparkline_cid, row.sparkline_png) for row in app_rows],
     )
 

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ group.label }} · Storepulse{% endblock %}
+{% block content %}
+<div class="head">
+  <h1>{{ group.label }} <span class="muted small">{{ group.platforms }}</span></h1>
+  <nav class="ranges" aria-label="Range">
+    {% for r in ranges %}<a href="/apps/{{ group.key }}?range={{ r }}" {% if r == days %}aria-current="true"{% endif %}>{{ r }} days</a>{% endfor %}
+  </nav>
+</div>
+{% if not as_of %}<section class="card"><p>No data yet.</p></section>{% endif %}
+<div class="side-by-side">
+{% for p in platforms %}
+  <section class="card">
+    <h2>{{ "iOS" if p.app.platform == "ios" else "Android" }} <span class="muted small">{{ p.app.store_id }}</span></h2>
+    {% if p.installs is defined %}
+      <p><strong>{{ p.installs|count }}</strong> installs ·
+        {% for c, v in p.proceeds.items() %}{{ v|money(c) }}{% if not loop.last %}, {% endif %}{% else %}no proceeds{% endfor %}</p>
+      <div class="chart"><canvas class="app-chart" data-source="chart-{{ loop.index }}" aria-label="Daily installs"></canvas></div>
+      <script type="application/json" id="chart-{{ loop.index }}">{{ p.chart|safe }}</script>
+      <h3>Top countries</h3>
+      <table>
+        <thead><tr><th>Country</th><th class="num">Installs</th></tr></thead>
+        <tbody>
+        {% for country, ios, android in p.countries %}
+          <tr><td>{{ country }}</td><td class="num">{{ (ios + android)|count }}</td></tr>
+        {% else %}<tr><td colspan="2" class="muted">No installs in this range.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+    {% if p.vitals is defined %}
+      <h3>Vitals</h3>
+      <table>
+        <tbody>
+          <tr><th>Crash rate, 28 days</th><td class="num">{{ p.vitals.crash_rate_28d }}</td></tr>
+          <tr><th>ANR rate, 28 days</th><td class="num">{{ p.vitals.anr_rate_28d }}</td></tr>
+          <tr><th>Crash rate, latest day</th><td class="num">{{ p.vitals.crash_rate }}</td></tr>
+          <tr><th>ANR rate, latest day</th><td class="num">{{ p.vitals.anr_rate }}</td></tr>
+          <tr><th>Users (crash metric set)</th><td class="num">{{ p.vitals_users }}</td></tr>
+        </tbody>
+      </table>
+      <p class="muted small">"—" means Google didn't report that rate, usually because the app is below its minimum number of users.</p>
+    {% endif %}
+  </section>
+{% endfor %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/vendor/chart.umd.min.js"></script><script src="/static/dashboard.js"></script>{% endblock %}

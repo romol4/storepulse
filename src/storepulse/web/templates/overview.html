@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Overview · Storepulse{% endblock %}
+{% block content %}
+<div class="head">
+  <h1>Overview</h1>
+  <nav class="ranges" aria-label="Range">
+    {% for r in ranges %}<a href="/?range={{ r }}" {% if r == days %}aria-current="true"{% endif %}>{{ r }} days</a>{% endfor %}
+  </nav>
+</div>
+{% if not configured %}
+  <section class="card"><p>Nothing is set up yet. <a href="/settings">Add your Apple and Google credentials</a> to start collecting.</p></section>
+{% elif not as_of %}
+  <section class="card"><p>No data has been collected yet. Start a first backfill on the <a href="/sources">Sources</a> page.</p></section>
+{% else %}
+  <p class="muted">The {{ days }} days ending {{ as_of }} (the latest day every configured store has reported).</p>
+  <div class="tiles">
+    <div class="tile"><span class="label">Installs</span><span class="value">{{ series.total|count }}</span>
+      <span class="sub">iOS {{ series.ios|sum|count }} · Android {{ series.android|sum|count }}</span></div>
+    <div class="tile"><span class="label">Proceeds (net)</span>
+      {% if proceeds %}{% for c, v in proceeds.items() %}<span class="value">{{ v|money(c) }}</span>{% endfor %}{% else %}<span class="value">—</span>{% endif %}</div>
+    {% if sales_gross %}
+    <div class="tile"><span class="label">Android sales (gross, provisional)</span>
+      {% for c, v in sales_gross.items() %}<span class="value small">{{ v|money(c) }}</span>{% endfor %}</div>
+    {% endif %}
+  </div>
+  <section class="card">
+    <h2>Daily installs</h2>
+    <div class="chart"><canvas id="installs" aria-label="Daily installs, iOS and Android"></canvas></div>
+    <script type="application/json" id="chart-data">{{ chart|safe }}</script>
+  </section>
+  <section class="card">
+    <h2>Apps</h2>
+    <table>
+      <thead><tr><th>App</th><th>Platforms</th><th class="num">Installs</th><th>Proceeds</th><th class="num">Crash 28d</th><th class="num">ANR 28d</th></tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td><a href="/apps/{{ row.group.key }}?range={{ days }}">{{ row.group.label }}</a></td>
+          <td>{{ row.group.platforms }}</td>
+          <td class="num">{{ row.installs|count }}</td>
+          <td>{% for c, v in row.proceeds.items() %}{{ v|money(c) }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td>
+          <td class="num">{{ row.crash }}</td>
+          <td class="num">{{ row.anr }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endif %}
+{% endblock %}
+{% block scripts %}<script src="/static/vendor/chart.umd.min.js"></script><script src="/static/dashboard.js"></script>{% endblock %}

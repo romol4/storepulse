@@ -13,8 +13,16 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
+import httpx
+
 from storepulse.core import config, db, digest, discovery, mailer
-from storepulse.core.secrets import redact
+from storepulse.core.secrets import (
+    APPLE_P8_SECRET,
+    GOOGLE_SA_SECRET,
+    SMTP_PASSWORD_SECRET,
+    SecretStore,
+    redact,
+)
 from storepulse.core.sources import (
     apple_sales,
     apple_subscription_events,
@@ -25,6 +33,7 @@ from storepulse.core.sources import (
     play_vitals,
 )
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient, AppleVendorError
+from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import (
     BULK_PERMISSION,
     FINANCIAL_PERMISSION,
@@ -966,6 +975,65 @@ def _run_lock(data_dir: Path) -> Iterator[None]:
 
 
 @dataclass
+class RunClients:
+    """API clients and the SMTP password for one run, built from a secret store."""
+
+    apple: AppleClient | None = None
+    google: GoogleClient | None = None
+    smtp_password: str | None = None
+    # A platform whose credential is missing or broken: reported like a source error,
+    # never raised, so the other platform still runs (docs/SPEC.md).
+    errors: list[str] = field(default_factory=list)
+
+    def close(self) -> None:
+        for client in (self.apple, self.google):
+            if client is not None:
+                client.close()
+
+
+def clients_from_store(
+    store: SecretStore,
+    cfg: config.Config,
+    *,
+    transport: httpx.BaseTransport | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> RunClients:
+    """Build the clients a run needs. Shared by `storepulse run` and the hosted scheduler,
+    so both treat a missing or corrupt credential the same way."""
+    clients = RunClients()
+    if cfg.apple is not None:
+        p8 = store.get(APPLE_P8_SECRET)
+        if p8 is None:
+            clients.errors.append(
+                f"apple_sales: no Apple key found in {store.describe()}; set it up again"
+            )
+        else:
+            try:
+                clients.apple = AppleClient(
+                    cfg.apple.issuer_id, cfg.apple.key_id, p8, transport=transport, sleep=sleep
+                )
+            except ValueError as exc:
+                clients.errors.append(f"apple_sales: {exc}")
+    if cfg.google is not None:
+        raw = store.get(GOOGLE_SA_SECRET)
+        if raw is None:
+            clients.errors.append(
+                f"google_auth: no Google service account found in {store.describe()}; "
+                "set it up again"
+            )
+        else:
+            try:
+                sa = load_service_account(raw)
+            except GoogleCredentialError as exc:
+                clients.errors.append(f"google_auth: {exc}")
+            else:
+                clients.google = GoogleClient(sa, transport=transport, sleep=sleep)
+    if cfg.email is not None:
+        clients.smtp_password = store.get(SMTP_PASSWORD_SECRET)
+    return clients
+
+
+@dataclass
 class RunAllResult:
     errors: list[str] = field(default_factory=list)
     email_sent: bool = False
@@ -984,6 +1052,7 @@ def _run_apple(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -996,6 +1065,7 @@ def _run_apple(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1015,6 +1085,7 @@ def _run_apple_subscriptions(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -1027,6 +1098,7 @@ def _run_apple_subscriptions(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1047,6 +1119,7 @@ def _run_apple_subscription_events(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -1059,6 +1132,7 @@ def _run_apple_subscription_events(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1124,6 +1198,8 @@ def run_all(
     today: date | None = None,
     smtp_factory: mailer.SMTPFactory | None = None,
     progress: Callable[[str, str], None] | None = None,
+    dashboard_url: str | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> RunAllResult:
     """Collect every configured source independently, then build and send the digest.
 
@@ -1144,7 +1220,7 @@ def run_all(
                 _run_apple_subscriptions,
                 _run_apple_subscription_events,
             ):
-                error = run_source(conn, cfg, apple_client, days, today, report)
+                error = run_source(conn, cfg, apple_client, days, today, report, sleep)
                 if error:
                     result.errors.append(error)
 
@@ -1182,7 +1258,7 @@ def run_all(
             if vitals_error:
                 result.errors.append(vitals_error)
 
-        built = digest.build_digest(conn, cfg, today=today)
+        built = digest.build_digest(conn, cfg, today=today, dashboard_url=dashboard_url)
         result.digest = built
 
         if send_email:
