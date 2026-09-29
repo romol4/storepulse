@@ -250,6 +250,11 @@ def _offer_schedule(env: Env, cfg: config.Config) -> None:
 
 
 def cmd_init(args: argparse.Namespace, env: Env) -> int:
+    if config.hosted_mode():
+        raise CliError(
+            "hosted mode is set up in the web app (the setup page, then Settings), not "
+            "with `storepulse init` (README, 'Hosted mode')"
+        )
     cfg = config.load()
     env.say("Storepulse setup. Each platform is optional; set up at least one.")
     apple = google = email = None

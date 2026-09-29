@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import sqlite3
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import platformdirs
+
+from storepulse.core import db
+from storepulse.core.secrets import STORE_DB
 
 APP_NAME = "storepulse"
 CONFIG_FILENAME = "config.toml"
@@ -103,11 +109,47 @@ class Config:
     extra: dict[str, object] = field(default_factory=dict)
 
 
+CONFIG_SECTIONS = ("apple", "google", "email", "digest", "schedule")
+MODE_ENV = "STOREPULSE_MODE"
+
+
 class ConfigError(Exception):
     pass
 
 
+def hosted_mode() -> bool:
+    """True inside the hosted container (``STOREPULSE_MODE=hosted``, set by the
+    Dockerfile), where settings live in the database's ``settings`` table and secrets in
+    ``secrets``, not in ``config.toml`` and the OS keychain."""
+    return os.environ.get(MODE_ENV, "").strip().lower() == "hosted"
+
+
+def load_hosted(conn: sqlite3.Connection) -> Config:
+    """Hosted mode's Config, from the settings table. Its secret store is always the
+    database (docs/SPEC.md, Storage)."""
+    cfg = from_settings(db.get_settings(conn))
+    cfg.secret_store = STORE_DB
+    return cfg
+
+
+def save_hosted(conn: sqlite3.Connection, cfg: Config) -> None:
+    """Write every Config field to the settings table; sections set to None are removed."""
+    values = to_settings(cfg)
+    stale = [
+        key
+        for key in db.get_settings(conn)
+        if key.partition(".")[0] in CONFIG_SECTIONS and key not in values
+    ]
+    db.set_settings(conn, values, remove=stale)
+
+
 def load(path: Path | None = None) -> Config:
+    if path is None and hosted_mode():
+        conn = db.connect(db_path())
+        try:
+            return load_hosted(conn)
+        finally:
+            conn.close()
     path = path or config_dir() / CONFIG_FILENAME
     if not path.exists():
         return Config()
@@ -115,6 +157,14 @@ def load(path: Path | None = None) -> Config:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from None
+    return from_mapping(raw, str(path))
+
+
+def from_mapping(raw: dict[str, Any], path: str = "settings") -> Config:
+    """Build a Config from the nested ``{section: {field: value}}`` shape that both
+    ``config.toml`` and the hosted ``settings`` table (after ``unflatten``) produce.
+    ``path`` names the source in error messages."""
+    raw = dict(raw)
     cfg = Config(secret_store=str(raw.pop("secret_store", "")))
     apple = raw.pop("apple", None)
     if isinstance(apple, dict):
@@ -246,7 +296,48 @@ def dumps(cfg: Config) -> str:
     return "\n".join(lines) + "\n"
 
 
+def to_mapping(cfg: Config) -> dict[str, dict[str, Any]]:
+    """The nested ``{section: {field: value}}`` form of a Config, without ``secret_store``
+    and ``extra`` (the hosted settings table stores neither; docs/SPEC.md, Storage)."""
+    sections: dict[str, dict[str, Any]] = {}
+    if cfg.apple is not None:
+        sections["apple"] = dataclasses.asdict(cfg.apple)
+    if cfg.google is not None:
+        sections["google"] = dataclasses.asdict(cfg.google)
+    if cfg.email is not None:
+        sections["email"] = dataclasses.asdict(cfg.email)
+    sections["digest"] = dataclasses.asdict(cfg.digest)
+    sections["schedule"] = dataclasses.asdict(cfg.schedule)
+    return sections
+
+
+def to_settings(cfg: Config) -> dict[str, Any]:
+    """One entry per dotted key (``apple.vendor_number``, ``digest.rates``, …), the shape
+    of the hosted ``settings`` table."""
+    return {
+        f"{section}.{name}": value
+        for section, fields in to_mapping(cfg).items()
+        for name, value in fields.items()
+    }
+
+
+def from_settings(rows: dict[str, Any]) -> Config:
+    """The inverse of ``to_settings``. Keys outside Config's sections (hosted-only
+    settings such as ``hosted.base_url``) are ignored here."""
+    nested: dict[str, dict[str, Any]] = {}
+    for key, value in rows.items():
+        section, _, name = key.partition(".")
+        if section in CONFIG_SECTIONS and name:
+            nested.setdefault(section, {})[name] = value
+    return from_mapping(nested)
+
+
 def save(cfg: Config, path: Path | None = None) -> Path:
+    if path is None and hosted_mode():
+        raise ConfigError(
+            "in hosted mode, settings are changed in the web app's Settings page, not with "
+            "this command"
+        )
     if cfg.extra:
         raise ConfigError("unknown config sections would be lost on save")
     path = path or config_dir() / CONFIG_FILENAME
