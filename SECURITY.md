@@ -134,11 +134,13 @@ or review yet.
       in-memory and reset on restart.
 - [x] A TOTP code cannot be replayed within its validity window (`claim_totp_step`).
 - [x] CSRF is rejected on every state-changing route; a GET never requires a token.
-- [x] A new session token is issued on login (no session fixation from a pre-auth
-      cookie): `start_session` always mints a fresh token, kept separate from the
-      anonymous CSRF cookie used before login.
-- [x] Session expiry is enforced server-side end-to-end (`get_session`'s
-      `expires_at > now` check), not only via cookie `Max-Age`.
+- [ ] A new session token is issued on login (no session fixation from a pre-auth
+      cookie) — true today (`start_session` always mints a fresh token, kept
+      separate from the anonymous CSRF cookie used before login) but not backed
+      by a test. (5b)
+- [ ] Session expiry is enforced server-side end-to-end (`get_session`'s
+      `expires_at > now` check), not only via cookie `Max-Age` — true today but
+      not backed by a test. (5b)
 - [x] `X-Forwarded-For` is not trusted for rate-limiting/throttle keys unless
       `STOREPULSE_TRUSTED_PROXIES` is explicitly configured (uvicorn's
       `forwarded_allow_ips`, default `127.0.0.1`).
