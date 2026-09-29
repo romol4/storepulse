@@ -41,6 +41,7 @@ def cmd_run(args: argparse.Namespace, env: Env) -> int:
                 today=env.pacific_today(),
                 smtp_factory=env.smtp_factory,
                 progress=progress,
+                sleep=env.sleep,
             )
     finally:
         conn.close()

@@ -1052,6 +1052,7 @@ def _run_apple(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -1064,6 +1065,7 @@ def _run_apple(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1083,6 +1085,7 @@ def _run_apple_subscriptions(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -1095,6 +1098,7 @@ def _run_apple_subscriptions(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1115,6 +1119,7 @@ def _run_apple_subscription_events(
     days: int,
     today: date,
     progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
 ) -> str | None:
     assert cfg.apple is not None
     yesterday = today - timedelta(days=1)
@@ -1127,6 +1132,7 @@ def _run_apple_subscription_events(
             dates,
             today=today,
             progress=lambda d, outcome: progress(d.isoformat(), outcome),
+            sleep=sleep,
         )
     except Exception as exc:  # one failing source never blocks the others or the digest
         message = redact(f"{type(exc).__name__}: {exc}")
@@ -1192,6 +1198,8 @@ def run_all(
     today: date | None = None,
     smtp_factory: mailer.SMTPFactory | None = None,
     progress: Callable[[str, str], None] | None = None,
+    dashboard_url: str | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> RunAllResult:
     """Collect every configured source independently, then build and send the digest.
 
@@ -1212,7 +1220,7 @@ def run_all(
                 _run_apple_subscriptions,
                 _run_apple_subscription_events,
             ):
-                error = run_source(conn, cfg, apple_client, days, today, report)
+                error = run_source(conn, cfg, apple_client, days, today, report, sleep)
                 if error:
                     result.errors.append(error)
 
@@ -1250,7 +1258,7 @@ def run_all(
             if vitals_error:
                 result.errors.append(vitals_error)
 
-        built = digest.build_digest(conn, cfg, today=today)
+        built = digest.build_digest(conn, cfg, today=today, dashboard_url=dashboard_url)
         result.digest = built
 
         if send_email:

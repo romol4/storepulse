@@ -124,6 +124,21 @@ def hosted_mode() -> bool:
     return os.environ.get(MODE_ENV, "").strip().lower() == "hosted"
 
 
+def enter_hosted_mode() -> None:
+    """Mark this process as hosted (``storepulse serve``), so every command and job it
+    runs reads settings and secrets from the database."""
+    os.environ[MODE_ENV] = "hosted"
+
+
+TRUSTED_PROXIES_ENV = "STOREPULSE_TRUSTED_PROXIES"
+
+
+def trusted_proxies() -> str:
+    """Addresses whose X-Forwarded-* headers the hosted server believes (the reverse
+    proxy). Default: only localhost."""
+    return os.environ.get(TRUSTED_PROXIES_ENV, "").strip() or "127.0.0.1"
+
+
 def load_hosted(conn: sqlite3.Connection) -> Config:
     """Hosted mode's Config, from the settings table. Its secret store is always the
     database (docs/SPEC.md, Storage)."""

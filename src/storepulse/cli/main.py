@@ -14,6 +14,7 @@ from storepulse.cli.digest import cmd_digest
 from storepulse.cli.doctor import cmd_doctor
 from storepulse.cli.run import cmd_run
 from storepulse.cli.schedule import cmd_schedule_install, cmd_schedule_remove, cmd_schedule_show
+from storepulse.cli.serve import cmd_serve
 from storepulse.cli.setup import cmd_init
 from storepulse.core import config
 from storepulse.core.mailer import MailerError
@@ -84,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = schedule_sub.add_parser("show", help="show the current schedule status")
     show.set_defaults(func=cmd_schedule_show)
+
+    serve = sub.add_parser(
+        "serve",
+        help="run the hosted web app (needs storepulse[web] and STOREPULSE_MASTER_KEY)",
+    )
+    serve.add_argument("--host", default="127.0.0.1", help="address to bind (default: 127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8000, help="port (default: 8000)")
+    serve.set_defaults(func=cmd_serve)
 
     return parser
 

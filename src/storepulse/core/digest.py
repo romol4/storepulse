@@ -171,6 +171,11 @@ def _format_money(currency: str, amount: float) -> str:
     return f"{amount:,.2f} {currency}".strip()
 
 
+def format_money(currency: str, amount: float) -> str:
+    """Public: the hosted dashboard formats money exactly like the digest."""
+    return _format_money(currency, amount)
+
+
 def _installs_text(count: float) -> str:
     return f"{count:.0f} install" + ("" if round(count) == 1 else "s")
 
@@ -649,6 +654,24 @@ def _source_status_text(
     return f"{label} ok{note}"
 
 
+def source_statuses(
+    conn: sqlite3.Connection, cfg: config.Config, today: date | None = None
+) -> list[tuple[str, str]]:
+    """(source, status text) per configured source, exactly as the digest's Data line
+    words it; the hosted Sources page shows the same list."""
+    today = today if today is not None else apple_sales.pacific_today()
+    as_of = compute_as_of(conn, cfg) or today
+    return [
+        (
+            source,
+            _source_status_text(
+                conn, source, today, as_of, cfg.digest.stale_days, cfg.schedule.days
+            ),
+        )
+        for source in _configured_sources(conn, cfg)
+    ]
+
+
 def _data_line(conn: sqlite3.Connection, cfg: config.Config, today: date, as_of: date) -> str:
     sources = _configured_sources(conn, cfg)
     if not sources:
@@ -854,8 +877,14 @@ def _empty_digest() -> Digest:
 
 
 def build_digest(
-    conn: sqlite3.Connection, cfg: config.Config, *, today: date | None = None
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    *,
+    today: date | None = None,
+    dashboard_url: str | None = None,
 ) -> Digest:
+    """``dashboard_url`` (hosted mode) adds a link to the dashboard (docs/SPEC.md,
+    Outputs: "In hosted mode the email links to the dashboard")."""
     today = today if today is not None else apple_sales.pacific_today()
     as_of = compute_as_of(conn, cfg)
     if as_of is None:
@@ -898,10 +927,16 @@ def build_digest(
         unavailable=unavailable,
         quiet_apps=quiet_apps,
     )
+    text, html = _render_text(ctx), _render_html(ctx)
+    if dashboard_url:
+        text += f"\nDashboard: {dashboard_url}\n"
+        html = html.removesuffix("</div>") + (
+            f'<p><a href="{_html_escape(dashboard_url)}">Open the dashboard</a></p></div>'
+        )
     return Digest(
         as_of=as_of,
-        text=_render_text(ctx),
-        html=_render_html(ctx),
+        text=text,
+        html=html,
         images=[(row.sparkline_cid, row.sparkline_png) for row in app_rows],
     )
 
