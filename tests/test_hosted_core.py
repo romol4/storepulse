@@ -376,3 +376,14 @@ def test_display_name_replaces_the_store_name(conn: sqlite3.Connection) -> None:
     db.set_app_display(conn, ids["2"], display_name="Desk", hidden=False)
     result = digest.build_digest(conn, CFG, today=TODAY)
     assert "  Desk (iOS): 35 installs" in result.text
+
+
+def test_claim_totp_step_accepts_each_step_once() -> None:
+    conn = db.connect(config.db_path())
+    user_id = db.create_user(conn, "a@example.com", "hash", None)
+    assert db.claim_totp_step(conn, user_id, 100)
+    assert not db.claim_totp_step(conn, user_id, 100)  # the same code again
+    assert not db.claim_totp_step(conn, user_id, 99)  # an older one
+    assert db.claim_totp_step(conn, user_id, 101)
+    other = db.create_user(conn, "b@example.com", "hash", None)
+    assert db.claim_totp_step(conn, other, 100)  # per user

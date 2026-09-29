@@ -631,7 +631,8 @@ def totp_confirm(request: Request, csrf: FormStr = "", code: FormStr = "") -> Re
                 request, viewer, conn, FormProblem("account", "Start two-factor setup again.")
             )
         secret = store.unseal(_pending_label(viewer.user.id), bytes.fromhex(str(pending)))
-        if not security.verify_totp(secret, code):
+        step = security.totp_step(secret, code)
+        if step is None or not db.claim_totp_step(conn, viewer.user.id, step):
             return _page(
                 request,
                 conn,

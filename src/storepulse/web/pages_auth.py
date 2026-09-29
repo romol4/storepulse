@@ -183,10 +183,13 @@ def totp_submit(request: Request, csrf: FormStr = "", code: FormStr = "") -> Res
             )
         secret_enc = viewer.user.totp_secret_enc
         store = state.store(conn)
-        ok = secret_enc is not None and security.verify_totp(
-            store.unseal(f"users/{viewer.user.id}/totp", secret_enc), code
+        step = (
+            security.totp_step(store.unseal(f"users/{viewer.user.id}/totp", secret_enc), code)
+            if secret_enc is not None
+            else None
         )
-        if not ok:
+        # A code that already signed someone in (or an older one) is refused, like a wrong one.
+        if step is None or not db.claim_totp_step(conn, viewer.user.id, step):
             state.throttle.failed(*keys)
             return render(
                 request,

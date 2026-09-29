@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import io
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from conftest import (
 )
 from storepulse.core import config, db
 from storepulse.core.secrets import SecretStoreError
+from storepulse.web import security
 from storepulse.web.app import create_app
 from storepulse.web.jobs import JobDeps
 
@@ -335,9 +338,42 @@ def test_totp_enrolment_and_login(site: Site) -> None:
     csrf = site.csrf("/login/totp")
     bad = site.client.post("/login/totp", data={"csrf": csrf, "code": "123456"})
     assert bad.status_code == 401
-    good = site.client.post("/login/totp", data={"csrf": csrf, "code": pyotp.TOTP(secret).now()})
+    # The code that confirmed enrolment is spent; the next step's code (within the drift
+    # window) signs in.
+    spent = site.client.post("/login/totp", data={"csrf": csrf, "code": pyotp.TOTP(secret).now()})
+    assert spent.status_code == 401
+    good = site.client.post("/login/totp", data={"csrf": csrf, "code": _next_code(secret)})
     assert good.headers["location"] == "/"
     assert site.client.get("/").status_code == 200
+
+
+def _next_code(secret: str) -> str:
+    return pyotp.TOTP(secret).at(time.time() + 30)
+
+
+def test_a_totp_code_signs_in_only_once(site: Site) -> None:
+    """Regression: pyotp's verify() accepts a code for its whole window, so a code seen over
+    someone's shoulder (or replayed from a captured request) worked again for ~90 seconds."""
+    _setup_admin(site)
+    csrf = site.csrf("/settings")
+    page = site.client.post(
+        "/settings/account/totp/start", data={"csrf": csrf, "current": PASSWORD}
+    )
+    secret = re.search(r'<code class="secret">([A-Z2-7]+)</code>', page.text).group(1)  # type: ignore[union-attr]
+    site.client.post(
+        "/settings/account/totp/confirm", data={"csrf": csrf, "code": pyotp.TOTP(secret).now()}
+    )
+    code = _next_code(secret)
+    for attempt in ("first", "replay"):
+        site.client.cookies.clear()
+        _login(site)
+        csrf = site.csrf("/login/totp")
+        response = site.client.post("/login/totp", data={"csrf": csrf, "code": code})
+        if attempt == "first":
+            assert response.headers["location"] == "/"
+        else:
+            assert response.status_code == 401
+            assert site.client.get("/").headers["location"] == "/login"
 
 
 def test_changing_the_password_signs_out_other_sessions(site: Site) -> None:
@@ -646,3 +682,17 @@ def test_preferences_validation_and_save(site: Site) -> None:
     assert cfg.digest.rates == {"CAD": 0.73, "EUR": 1.09}
     assert cfg.digest.display_currency == "USD"
     assert db.get_settings(conn)["hosted.base_url"] == "https://stats.example.com"
+
+
+def test_totp_step_allows_one_step_of_drift() -> None:
+    secret = pyotp.random_base32()
+    totp = pyotp.TOTP(secret)
+    now = datetime(2026, 9, 29, 12, 0, 15, tzinfo=UTC)
+    step = totp.timecode(now)
+    for offset in (-1, 0, 1):
+        assert security.totp_step(secret, totp.generate_otp(step + offset), now) == step + offset
+    for offset in (-2, 2):
+        assert security.totp_step(secret, totp.generate_otp(step + offset), now) is None
+    spaced = totp.generate_otp(step)
+    assert security.totp_step(secret, f"{spaced[:3]} {spaced[3:]}", now) == step
+    assert security.totp_step(secret, "abcdef", now) is None

@@ -437,6 +437,21 @@ def set_user_password_hash(conn: sqlite3.Connection, user_id: int, password_hash
     conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
 
 
+def claim_totp_step(conn: sqlite3.Connection, user_id: int, step: int) -> bool:
+    """Record ``step`` as the user's last accepted TOTP time step, only if it is later than
+    the one already recorded. False means that code (or an earlier one) was already used.
+    One statement, so two requests racing with the same code can't both succeed."""
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at "
+            "WHERE CAST(settings.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+            (f"hosted.totp_last_step.{user_id}", json.dumps(step), utc_now()),
+        )
+    return cur.rowcount == 1
+
+
 def set_user_totp(conn: sqlite3.Connection, user_id: int, totp_secret_enc: bytes | None) -> None:
     conn.execute("UPDATE users SET totp_secret_enc = ? WHERE id = ?", (totp_secret_enc, user_id))
 

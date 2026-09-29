@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pyotp
 from argon2 import PasswordHasher
@@ -69,9 +70,19 @@ def totp_uri(secret: str, account: str) -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=account, issuer_name=TOTP_ISSUER)
 
 
-def verify_totp(secret: str, code: str) -> bool:
+def totp_step(secret: str, code: str, now: datetime | None = None) -> int | None:
+    """The time step ``code`` is valid for (the current one, or one either side for clock
+    drift), or None. Callers record the step with ``db.claim_totp_step`` so a code can't be
+    used twice: pyotp's own ``verify`` would accept the same code for its whole window."""
     code = "".join(code.split())
-    return code.isdigit() and pyotp.TOTP(secret).verify(code, valid_window=1)
+    if not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    current = totp.timecode(now or datetime.now(UTC))
+    for step in (current - 1, current, current + 1):
+        if hmac.compare_digest(totp.generate_otp(step).encode(), code.encode()):
+            return step
+    return None
 
 
 @dataclass

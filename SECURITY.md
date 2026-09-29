@@ -74,8 +74,8 @@ receives fixes.
   secret. Settings shows a fingerprint (a keyed HMAC, so the database alone can't be
   used to test guesses), the upload date and a *Test connection* button. Replacing
   a saved credential asks for your password again.
-- **The admin account.** Passwords are hashed with argon2id; TOTP is optional and
-  its secret is stored encrypted like the credentials. The first-run setup token is
+- **The admin account.** Passwords are hashed with argon2id; TOTP is optional, its
+  secret is stored encrypted like the credentials, and each code signs in only once. The first-run setup token is
   printed to the container log at each start until an admin exists, stored only as a
   hash, and stops working once the admin account is created.
 - **Sessions and forms.** Sessions are server-side; the cookie holds a random token
