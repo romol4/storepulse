@@ -165,6 +165,11 @@ def _installs_text(count: float) -> str:
     return f"{count:.0f} install" + ("" if round(count) == 1 else "s")
 
 
+def _pct(ratio: float | None) -> str:
+    """A 0-1 ratio as a percentage, or "—" when there's no value (not the same as 0)."""
+    return _NO_DATA if ratio is None else f"{ratio * 100:.1f}%"
+
+
 def _money_with_trend(currency: str, current: float, previous: float) -> str:
     return f"{_format_money(currency, current)}{_trend_suffix(current, previous)}"
 
@@ -696,14 +701,12 @@ def _render_html(ctx: _Context) -> str:
         if row.platform == "android" and (
             row.crash_rate_28d is not None or row.anr_rate_28d is not None
         ):
-            crash_daily = (row.crash_rate or 0) * 100
-            crash_28d = (row.crash_rate_28d or 0) * 100
-            anr_daily = (row.anr_rate or 0) * 100
-            anr_28d = (row.anr_rate_28d or 0) * 100
+            # A rate Google withheld is shown as "—", never as 0.0%: a missing crash
+            # rate must not read as a perfectly stable app.
             vitals_text = (
                 '<div style="color:#666;font-size:12px;">'
-                f"crash {crash_daily:.1f}% daily, {crash_28d:.1f}% 28d "
-                f"&middot; anr {anr_daily:.1f}% daily, {anr_28d:.1f}% 28d</div>"
+                f"crash {_pct(row.crash_rate)} daily, {_pct(row.crash_rate_28d)} 28d "
+                f"&middot; anr {_pct(row.anr_rate)} daily, {_pct(row.anr_rate_28d)} 28d</div>"
             )
         rows_html.append(
             "<tr>"

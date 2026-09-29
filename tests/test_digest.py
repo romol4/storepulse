@@ -352,7 +352,33 @@ def test_html_vitals_shown_when_only_one_rate_is_present(
     _log(conn, "apple_sales", AS_OF.isoformat())
     _log(conn, "play_installs", "2026-09-01")
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    assert "crash 0.0% daily, 0.0% 28d &middot; anr 0.0% daily, 0.1% 28d" in result.html
+    # Missing rates are "—", never 0.0%: Google withheld them, they aren't zero.
+    assert "crash — daily, — 28d &middot; anr — daily, 0.1% 28d" in result.html
+    assert "crash 0.0%" not in result.html
+
+
+def test_html_vitals_crash_present_anr_missing(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The mirror case: only the crash metric set came back, so ANR shows "—"."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
+    d = AS_OF.isoformat()
+    db.replace_source_range(
+        conn,
+        "play_vitals",
+        d,
+        d,
+        [
+            db.MetricRow(d, android_id, "ALL", "crash_rate", "", 0.004),
+            db.MetricRow(d, android_id, "ALL", "crash_rate_28d", "", 0.003),
+        ],
+        app_ids=[android_id],
+    )
+    _log(conn, "apple_sales", d)
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "crash 0.4% daily, 0.3% 28d &middot; anr — daily, — 28d" in result.html
 
 
 # -- overdue cadence rules -----------------------------------------------------------------
