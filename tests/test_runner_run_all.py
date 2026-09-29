@@ -20,6 +20,8 @@ from conftest import (
     apple_error,
     fixture_bytes,
     standard_objects,
+    subscription_events_fixture_bytes,
+    subscriptions_fixture_bytes,
 )
 from storepulse.core import config, db, runner
 from storepulse.core.sources.apple_client import AppleClient
@@ -146,6 +148,74 @@ def test_failing_source_still_produces_digest_and_sends_email(
     # Play data still landed even though Apple failed.
     assert (
         conn.execute("SELECT COUNT(*) FROM daily_metrics WHERE source LIKE 'play_%'").fetchone()[0]
+        > 0
+    )
+
+
+def test_full_run_collects_apple_subscriptions_and_events(
+    conn: sqlite3.Connection, p8_pem: str
+) -> None:
+    # apple_sales runs first in the same pass and registers deskFT/billFT from its app
+    # rows; the new sources never register an app themselves, so they depend on that.
+    apple = FakeApple(
+        apps=FT_APPS,
+        default_report=fixture_bytes("summary_normal.tsv.gz"),
+        default_subscriptions_report=subscriptions_fixture_bytes("summary_normal.tsv.gz"),
+        default_subscription_events_report=subscription_events_fixture_bytes(
+            "summary_normal.tsv.gz"
+        ),
+    )
+
+    result = runner.run_all(
+        conn,
+        _cfg(google=False, email=None),
+        apple_client=_apple_client(apple, p8_pem),
+        today=TODAY,
+        send_email=False,
+    )
+
+    assert result.errors == []
+    for source in ("apple_subscriptions", "apple_subscription_events"):
+        rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM daily_metrics WHERE source = ?", (source,)
+        ).fetchone()["n"]
+        assert rows > 0, f"expected rows from {source}"
+
+
+def test_failing_apple_subscriptions_does_not_block_sales_or_events(
+    conn: sqlite3.Connection, p8_pem: str
+) -> None:
+    apple = FakeApple(
+        apps=FT_APPS,
+        default_report=fixture_bytes("summary_normal.tsv.gz"),
+        subscriptions={YESTERDAY.isoformat(): apple_error(401, "bad key", "NOT_AUTHORIZED")},
+        default_subscription_events_report=subscription_events_fixture_bytes(
+            "summary_normal.tsv.gz"
+        ),
+    )
+
+    result = runner.run_all(
+        conn,
+        _cfg(google=False, email=None),
+        apple_client=_apple_client(apple, p8_pem),
+        today=TODAY,
+        send_email=False,
+    )
+
+    assert not result.ok
+    assert any(e.startswith("apple_subscriptions:") for e in result.errors)
+    assert not any(e.startswith("apple_sales:") for e in result.errors)
+    assert not any(e.startswith("apple_subscription_events:") for e in result.errors)
+    assert (
+        conn.execute("SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_sales'").fetchone()[
+            0
+        ]
+        > 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_subscription_events'"
+        ).fetchone()[0]
         > 0
     )
 

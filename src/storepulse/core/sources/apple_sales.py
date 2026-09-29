@@ -125,7 +125,8 @@ def classify_404(detail: str, report_date: date, today: date | None = None) -> F
     return "no_sales_inferred" if age > INFERRED_NO_SALES_AFTER_DAYS else "not_ready"
 
 
-def _vendor_error(exc: AppleError) -> AppleVendorError:
+def vendor_error(exc: AppleError) -> AppleVendorError:
+    """Shared by every /v1/salesReports report type (sales, subscriptions, events)."""
     return AppleVendorError(
         "App Store Connect rejected the vendor number. Find it in App Store Connect > "
         f"Payments and Financial Reports (top left). {DOCS_HINT}",
@@ -149,13 +150,13 @@ def fetch_day(
         content = client.get_bytes("/v1/salesReports", params, purpose=purpose)
     except AppleAuthError as exc:
         if "vendor" in exc.detail.lower():
-            raise _vendor_error(exc) from None
+            raise vendor_error(exc) from None
         raise
     except AppleError as exc:
         if exc.status == 404:
             return FetchResult(classify_404(exc.detail, report_date, today), detail=exc.detail)
         if exc.status == 400 and "vendor" in exc.detail.lower():
-            raise _vendor_error(exc) from None
+            raise vendor_error(exc) from None
         raise
     return FetchResult("ok", content=content)
 

@@ -6,10 +6,10 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (Phase 3 — local mode, v0.1).** What works today:
+> **Status: early development (Phase 3b — local mode, v0.1).** What works today:
 > - Guided setup (`storepulse init`), credential checks (`storepulse doctor`) and
->   historical loads (`storepulse backfill`) for Apple sales and Google Play installs,
->   sales, earnings and vitals.
+>   historical loads (`storepulse backfill`) for Apple sales, Apple subscription state
+>   and subscription events, and Google Play installs, sales, earnings and vitals.
 > - A daily email digest (`storepulse run`, `storepulse digest --dry-run`) and OS-native
 >   scheduling (`storepulse schedule install`).
 >
@@ -43,6 +43,8 @@ this quickstart end to end — install, `init`, `run` — gets you a received di
 
 ```bash
 storepulse backfill --source apple_sales --days 90
+storepulse backfill --source apple_subscriptions --days 90        # active subs and trials
+storepulse backfill --source apple_subscription_events --days 90  # churn events
 storepulse backfill --source play_installs --months 12
 storepulse backfill --source play_sales --months 3      # provisional gross sales
 storepulse backfill --source play_earnings --months 12  # final proceeds
@@ -52,12 +54,13 @@ storepulse backfill --source play_vitals --days 30
 Re-running a backfill is safe: rows are replaced, never duplicated.
 
 Other ways to pick dates:
-- Day-based sources (`apple_sales`, `play_vitals`) take `--from YYYY-MM-DD [--to YYYY-MM-DD]`.
+- Day-based sources (`apple_sales`, `apple_subscriptions`, `apple_subscription_events`,
+  `play_vitals`) take `--from YYYY-MM-DD [--to YYYY-MM-DD]`.
 - Monthly Play sources take `--from YYYY-MM [--to YYYY-MM]`.
 
 Limits:
-- Apple only keeps daily sales reports for about a year, so dates older than 365 days
-  are skipped with a warning.
+- Apple only keeps daily reports (sales, subscriptions, subscription events) for about a
+  year, so dates older than 365 days are skipped with a warning.
 - Play months before the first report file are skipped silently.
 
 **Android revenue comes in two stages:**

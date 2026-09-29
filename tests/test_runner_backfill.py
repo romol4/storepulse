@@ -15,6 +15,8 @@ from conftest import (
     FakeApple,
     apple_error,
     fixture_bytes,
+    subscription_events_fixture_bytes,
+    subscriptions_fixture_bytes,
 )
 from storepulse.core import db, discovery, runner
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient
@@ -71,6 +73,70 @@ def test_90_day_backfill_is_idempotent(ready_conn: sqlite3.Connection, p8_pem: s
     statuses = {r["status"] for r in ready_conn.execute("SELECT status FROM ingest_log")}
     assert statuses == {"ok"}
     assert "ZZ9" in _log(ready_conn, days[0])[0]["error"]
+
+
+def test_subscriptions_backfill_is_idempotent(ready_conn: sqlite3.Connection, p8_pem: str) -> None:
+    fake = FakeApple(
+        default_subscriptions_report=subscriptions_fixture_bytes("summary_normal.tsv.gz")
+    )
+    client = _client(fake, p8_pem)
+    days = _days(30)
+    first = runner.collect_apple_subscriptions(
+        ready_conn, client, "85000000", days, delay=0, today=TODAY
+    )
+    assert first.ok == 30 and not first.errors
+    count = int(
+        ready_conn.execute(
+            "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_subscriptions'"
+        ).fetchone()[0]
+    )
+    assert count > 0
+    second = runner.collect_apple_subscriptions(
+        ready_conn, client, "85000000", days, delay=0, today=TODAY
+    )
+    assert second.ok == 30
+    assert (
+        int(
+            ready_conn.execute(
+                "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_subscriptions'"
+            ).fetchone()[0]
+        )
+        == count
+    )
+
+
+def test_subscription_events_backfill_is_idempotent(
+    ready_conn: sqlite3.Connection, p8_pem: str
+) -> None:
+    fake = FakeApple(
+        default_subscription_events_report=subscription_events_fixture_bytes(
+            "summary_normal.tsv.gz"
+        )
+    )
+    client = _client(fake, p8_pem)
+    days = _days(30)
+    first = runner.collect_apple_subscription_events(
+        ready_conn, client, "85000000", days, delay=0, today=TODAY
+    )
+    assert first.ok == 30 and not first.errors
+    count = int(
+        ready_conn.execute(
+            "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_subscription_events'"
+        ).fetchone()[0]
+    )
+    assert count > 0
+    second = runner.collect_apple_subscription_events(
+        ready_conn, client, "85000000", days, delay=0, today=TODAY
+    )
+    assert second.ok == 30
+    assert (
+        int(
+            ready_conn.execute(
+                "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_subscription_events'"
+            ).fetchone()[0]
+        )
+        == count
+    )
 
 
 def test_delay_between_requests(ready_conn: sqlite3.Connection, p8_pem: str) -> None:

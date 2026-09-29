@@ -18,10 +18,20 @@ from storepulse.core import db
 
 FIXTURES = Path(__file__).parent / "fixtures"
 APPLE_FIXTURES = FIXTURES / "apple_sales"
+APPLE_SUBSCRIPTIONS_FIXTURES = FIXTURES / "apple_subscriptions"
+APPLE_SUBSCRIPTION_EVENTS_FIXTURES = FIXTURES / "apple_subscription_events"
 
 
 def fixture_bytes(name: str) -> bytes:
     return (APPLE_FIXTURES / name).read_bytes()
+
+
+def subscriptions_fixture_bytes(name: str) -> bytes:
+    return (APPLE_SUBSCRIPTIONS_FIXTURES / name).read_bytes()
+
+
+def subscription_events_fixture_bytes(name: str) -> bytes:
+    return (APPLE_SUBSCRIPTION_EVENTS_FIXTURES / name).read_bytes()
 
 
 @pytest.fixture(scope="session")
@@ -99,12 +109,26 @@ NOT_READY_DETAIL = (
 
 @dataclass
 class FakeApple:
-    """Mock App Store Connect. Sales responses keyed by report date; default is a report."""
+    """Mock App Store Connect. Sales responses keyed by report date; default is a report.
+
+    Every /v1/salesReports report type (SALES, SUBSCRIPTION, SUBSCRIPTION_EVENT) shares
+    this one endpoint, distinguished only by filter[reportType], so the handler branches
+    on it (defaulting to "SALES" when absent, so every existing test — which never set
+    this field — keeps working unmodified).
+    """
 
     apps: list[dict[str, str]] = field(default_factory=list)
     apps_status: int = 200
     sales: dict[str, httpx.Response | Callable[[], httpx.Response]] = field(default_factory=dict)
     default_report: bytes | None = None
+    subscriptions: dict[str, httpx.Response | Callable[[], httpx.Response]] = field(
+        default_factory=dict
+    )
+    default_subscriptions_report: bytes | None = None
+    subscription_events: dict[str, httpx.Response | Callable[[], httpx.Response]] = field(
+        default_factory=dict
+    )
+    default_subscription_events_report: bytes | None = None
     requests: list[httpx.Request] = field(default_factory=list)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -122,14 +146,23 @@ class FakeApple:
             ]
             return httpx.Response(200, json={"data": data, "links": {}})
         if request.url.path == "/v1/salesReports":
+            report_type = request.url.params.get("filter[reportType]", "SALES")
+            responses, default = {
+                "SALES": (self.sales, self.default_report),
+                "SUBSCRIPTION": (self.subscriptions, self.default_subscriptions_report),
+                "SUBSCRIPTION_EVENT": (
+                    self.subscription_events,
+                    self.default_subscription_events_report,
+                ),
+            }[report_type]
             day = request.url.params["filter[reportDate]"]
-            response = self.sales.get(day)
+            response = responses.get(day)
             if callable(response):
                 return response()
             if response is not None:
                 return response
-            if self.default_report is not None:
-                return httpx.Response(200, content=self.default_report)
+            if default is not None:
+                return httpx.Response(200, content=default)
             return apple_error(404, NO_SALES_DETAIL, "NOT_FOUND")
         return httpx.Response(404)
 
@@ -142,6 +175,15 @@ class FakeApple:
             r.url.params["filter[reportDate]"]
             for r in self.requests
             if r.url.path == "/v1/salesReports"
+        ]
+
+    def dates_for(self, report_type: str) -> list[str]:
+        """Like sales_dates(), scoped to one filter[reportType] (SALES, SUBSCRIPTION, ...)."""
+        return [
+            r.url.params["filter[reportDate]"]
+            for r in self.requests
+            if r.url.path == "/v1/salesReports"
+            and r.url.params.get("filter[reportType]", "SALES") == report_type
         ]
 
 

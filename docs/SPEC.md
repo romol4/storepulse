@@ -72,8 +72,9 @@ flowchart TD
 ```
 storepulse/
   core/
-    sources/apple_client.py  apple_sales.py  apple_analytics.py  google_auth.py  google_client.py
-            play_common.py  play_installs.py  play_sales.py  play_earnings.py  play_vitals.py  revenuecat.py
+    sources/apple_client.py  apple_sales.py  apple_subscriptions.py  apple_subscription_events.py
+            apple_analytics.py  google_auth.py  google_client.py  play_common.py  play_installs.py
+            play_sales.py  play_earnings.py  play_vitals.py  revenuecat.py
     discovery.py      list apps from each credential
     config.py         non-secret settings (config.toml) and local paths
     db.py             schema, migrations, upserts
@@ -110,7 +111,10 @@ Four sources, each behind its own module in `core/sources/`. Each is optional: a
   - **404s:** a 404 whose detail says there were no sales is stored as a zero-sales day (clears that day's rows). "Not available yet" is `not_ready`. Any other 404 is `not_ready` for dates up to 2 days old and inferred no-sales for older dates; an inferred no-sales day never deletes stored rows (it logs a warning instead).
   - **Retention:** Apple keeps daily reports for about a year, so backfills are clamped to the last 365 days (Pacific time); earlier dates are skipped with a warning and never recorded.
   - **Auth:** the JWT is re-signed after 15 minutes so long backfills never run on an expired token.
-- **Subscriptions:** same endpoint with `reportType=SUBSCRIPTION` / `SUBSCRIPTION_EVENT` for apps with subscriptions.
+- **Subscriptions:** `GET /v1/salesReports` with `filter[frequency]=DAILY`, `filter[reportType]=SUBSCRIPTION`, `filter[reportSubType]=SUMMARY`, `filter[version]=1_3`, `filter[vendorNumber]`, `filter[reportDate]=YYYY-MM-DD` — the same endpoint as Sales, and the one real divergence from it: every `/v1/salesReports` report type needs `filter[reportSubType]=SUMMARY`, but only Subscription and Subscription Event additionally require `filter[version]=1_3`. Response is a gzipped TSV, one row per (app, subscription, country, device, client, state) segment for that day — a snapshot, not an event log, so active counts are already aggregated into named columns rather than one row per subscriber. Rows resolve to an app by App Apple ID directly (no parent-SKU indirection, unlike Sales' in-app-purchase rows), and this source never registers a new app. `active_subscriptions` sums every "active" column except the four free-trial ones (Standard Price; the paid Pay Up Front and Pay As You Go columns for the Introductory Offer, Promotional Offer, Offer Code and Win-Back families, 2 each; Marketing Opt-Ins; Billing Retry; Grace Period — 12 columns in total). `active_trials` sums exactly those four free-trial columns (one per family: Introductory Offer, Promotional Offer, Offer Code, Win-Back). The `Subscribers` column is a distinct per-segment headcount, not a subscription-instance count, and is not used by either metric. 404s, retention and JWT handling are identical to Sales (`classify_404`, the 365-day Pacific clamp, and the 15-minute re-sign); a day with no rows for an app means zero active subscriptions, and either way nothing is written (Storage's "absence means zero"). Both metrics write a per-country row plus a self-computed `country='ALL'` total (Storepulse sums the segments itself; unlike `play_installs`, Apple's report has no separate worldwide file to draw the total from) — a future reader should use `all_only=True` against it, the same convention `play_installs`' `ALL` row already uses.
+- **Subscription events:** same endpoint and `filter[version]=1_3`, with `filter[reportType]=SUBSCRIPTION_EVENT`. Unlike the Subscription report, this is an event log: one row per distinct event occurrence that day, with a `Quantity` column aggregating repeats of the same event/segment. Rows resolve to an app by App Apple ID directly, same as the Subscription report, and this source never registers a new app either. `subscription_churn` sums `Quantity` for rows whose `Event` is `Cancel`, `Canceled from Billing Retry`, or `Refund`; every other recognized event (`Renew`, `Start Introductory Price`, `Paid Subscription from Introductory Price`, offer starts, upgrades/downgrades/crossgrades, reactivations, billing-retry transitions) is acknowledged but contributes to no metric, the same treatment Sales gives an `IA3` restore. An `Event` value outside both sets is logged and counted, never fails the run — the same treatment as an unrecognized Product Type Identifier. Writes a per-country row plus a self-computed `country='ALL'` total, same convention as the Subscription report above.
+- Subscription revenue is unaffected by either report: `IAY` rows in the daily Sales report still own `proceeds` for auto-renewable subscriptions; neither new source ever writes a `proceeds` metric, only subscription-state counts (Storage's "a row belongs to the source that wrote it" rule would reject a stray write anyway).
+- **Not built:** Apple also publishes a `SUBSCRIBER` report — a per-subscriber transaction log with a stable Subscriber ID, useful for cohort/LTV analysis. The Subscription report already gives the pre-aggregated active/trial counts this phase needs, so the Subscriber report is a noted future option, not built now.
 - **Analytics:** one-time setup per app: `POST /v1/analyticsReportRequests` with `accessType: ONGOING`. Daily: list the request's reports, pick the needed ones (downloads, discovery and engagement), fetch `DAILY` instances, download segment files (gzipped CSV). Store the request IDs in the DB so setup never repeats.
 
 ### Google: Play Console bulk reports
@@ -185,8 +189,10 @@ CREATE TABLE ingest_log (
   status TEXT NOT NULL CHECK (status IN ('ok','not_ready','error')),
   rows INTEGER, error TEXT,
   app_id INTEGER REFERENCES apps(id)  -- set for a per-app source (play_installs, play_vitals);
-                                       -- NULL for an account-wide one (apple_sales, play_sales,
-                                       -- play_earnings), where report_date alone identifies a pull
+                                       -- NULL for an account-wide one (apple_sales,
+                                       -- apple_subscriptions, apple_subscription_events,
+                                       -- play_sales, play_earnings), where report_date alone
+                                       -- identifies a pull
 );
 
 CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, Apple SKU map, schema version
@@ -207,6 +213,9 @@ CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);  -- analytics request IDs, A
 | `crash_rate`, `anr_rate` | ratio 0–1, daily | play\_vitals | mean weighted by `vitals_users` |
 | `crash_rate_28d`, `anr_rate_28d` | ratio 0–1, 28-day user-weighted | play\_vitals | last value (already a 28-day window) |
 | `vitals_users` | count (distinct users in the crash-rate metric set; a snapshot, not additive) | play\_vitals | last value |
+| `active_subscriptions` | count (snapshot) | apple\_subscriptions | last value |
+| `active_trials` | count (snapshot) | apple\_subscriptions | last value |
+| `subscription_churn` | count | apple\_subscription\_events | sum |
 
 **Rules**
 
@@ -264,7 +273,7 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 - Raw downloaded files are cached for 30 days so parsers can be fixed and re-run without re-downloading.
 - A lock prevents overlapping runs.
 - Any `error`, or a report that is overdue, is flagged in the digest. Overdue depends on the source's cadence:
-  - daily sources (`apple_sales`, `play_vitals`): still `not_ready` 4 days after `report_date`;
+  - daily sources (`apple_sales`, `apple_subscriptions`, `apple_subscription_events`, `play_vitals`): still `not_ready` 4 days after `report_date`;
   - `play_installs` and `play_sales` (monthly files rewritten daily, logged with the month's first day): still `not_ready` 4 days into the month;
   - `play_earnings` (published once, early in the following month): still `not_ready` after the 15th of the month following `report_date`.
 - The error flag looks only at `report_date`s the daily run currently re-attempts (the
@@ -353,10 +362,10 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
    - *Done when:* a fresh machine goes from `pipx install` to a received digest in under 15 minutes following the README; published to PyPI.
 
 **3b. Apple subscription reports** (added after Phase 3, so the later phase numbers stay the same)
-- Daily `SALES/SUBSCRIPTION` and `SUBSCRIPTION_EVENT` reports from `GET /v1/salesReports`. Metrics for active subscriptions, trials and churn events are added to the vocabulary in this phase.
-- Until then, auto-renewable subscription revenue still arrives through `IAY` rows in the daily SALES report; only the subscription state (active, trial, churn) is missing.
-- Overlaps with the open "Revenue source" decision: if RevenueCat is chosen, this phase is limited to what RevenueCat doesn't cover.
-- *Done when:* active subscriptions and trials match App Store Connect's Subscriptions dashboard for three sample days, and re-runs don't change row counts.
+- Daily `SUBSCRIPTION` and `SUBSCRIPTION_EVENT` reports from `GET /v1/salesReports` (see Apple: App Store Connect above for the verified columns, filters and derived-metric formulas). `active_subscriptions`, `active_trials` and `subscription_churn` are added to the vocabulary in this phase.
+- Auto-renewable subscription revenue already arrives through `IAY` rows in the daily Sales report; only the subscription state (active, trial, churn) was missing before this phase, and neither new source ever writes `proceeds`.
+- Resolves the open "Revenue source" decision in favor of "store reports for everything": RevenueCat (Phase 6) hasn't been started, so this phase is not limited by it. If RevenueCat is adopted later, a future phase can narrow or retire what these two sources cover.
+- *Done when:* fixture-driven parser and mapping tests hit exact, hand-verified totals for both reports, and re-runs don't change row counts. Comparing `active_subscriptions`/`active_trials` against App Store Connect's Subscriptions dashboard is deferred to whenever a subscription-bearing app is available to dogfood against — LogicFT's FT apps have no confirmed subscription products today.
 
 4. **Hosted shell → release v0.2 (hosted)**
    - FastAPI app, admin account + TOTP, setup token, `DbEncryptedStore`, web setup flow, dashboard pages, in-process scheduler, Dockerfile, compose file, Caddy example.
@@ -372,7 +381,7 @@ For every phase: parser unit tests against scrubbed sample reports in `tests/fix
 
 ## Open decisions
 
-- [ ] **Revenue source.** Store reports for everything (simpler, messier for subscriptions) or stores for installs and vitals plus RevenueCat for revenue (cleaner MRR, trials, churn; one more key).
+- [x] **Revenue source** (Phase 3b). Store reports for everything, resolved in favor of the simpler option: RevenueCat (Phase 6) hadn't been started when Phase 3b needed `active_subscriptions`/`active_trials`/`subscription_churn`, so there was nothing to narrow this phase's scope against. A later RevenueCat phase can still narrow or retire what the Apple subscription sources cover.
 - [x] **Currency conversion** (Phase 3). Proceeds are shown per currency, with no conversion and no new outbound calls (no daily reference rate lookup). A converted total is shown only if the user sets fixed rates and a display currency in `config.toml`'s `[digest]` section.
 - [ ] **Language.** Python (current draft: mature JWT, GCS, keyring, and web libraries; `pipx` install) or Go for a single static binary that non-Python users install more easily.
 - [ ] **License.** Apache-2.0 (current draft) or MIT for maximum adoption, or AGPL-3.0 if anyone running a modified version as a public service should have to share their changes. This also affects whether LogicFT could later sell a managed, per-customer-isolated hosted version.

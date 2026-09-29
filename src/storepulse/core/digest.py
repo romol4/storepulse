@@ -23,6 +23,8 @@ from html import escape
 from storepulse.core import charts, config
 from storepulse.core.sources import (
     apple_sales,
+    apple_subscription_events,
+    apple_subscriptions,
     play_earnings,
     play_installs,
     play_sales,
@@ -56,6 +58,8 @@ _CURRENCY_SYMBOLS = {
 
 _SOURCE_LABELS = {
     apple_sales.SOURCE: "apple_sales",
+    apple_subscriptions.SOURCE: "apple_subscriptions",
+    apple_subscription_events.SOURCE: "apple_subscription_events",
     play_installs.SOURCE: "play_installs",
     play_sales.SOURCE: "play_sales",
     play_earnings.SOURCE: "play_earnings",
@@ -67,6 +71,8 @@ _SOURCE_LABELS = {
 # by the 15th of the month following it, i.e. the 15th of the current month.
 _SOURCE_CADENCE = {
     apple_sales.SOURCE: "daily",
+    apple_subscriptions.SOURCE: "daily",
+    apple_subscription_events.SOURCE: "daily",
     play_installs.SOURCE: "monthly",
     play_sales.SOURCE: "monthly",
     play_earnings.SOURCE: "earnings",
@@ -431,17 +437,26 @@ def _vitals_warnings(app_rows: list[AppRow], digest_cfg: config.DigestConfig) ->
 # -- source freshness (docs/SPEC.md, Scheduling and reliability) -----------------------
 
 
+def _seen(conn: sqlite3.Connection, source: str) -> bool:
+    row = conn.execute("SELECT 1 FROM ingest_log WHERE source = ? LIMIT 1", (source,)).fetchone()
+    return row is not None
+
+
 def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[str]:
     sources: list[str] = []
     if cfg.apple is not None:
         sources.append(apple_sales.SOURCE)
+        # Unlike apple_sales, shown only once seen: not every app has subscription
+        # products, and an account with none may get an ambiguous 404 rather than a
+        # clean empty report, so showing these unconditionally risked permanent
+        # false "not_ready" noise for developers with no subscriptions at all.
+        for source in (apple_subscriptions.SOURCE, apple_subscription_events.SOURCE):
+            if _seen(conn, source):
+                sources.append(source)
     if cfg.google is not None:
         sources += [play_installs.SOURCE, play_vitals.SOURCE]
         for source in (play_sales.SOURCE, play_earnings.SOURCE):
-            seen = conn.execute(
-                "SELECT 1 FROM ingest_log WHERE source = ? LIMIT 1", (source,)
-            ).fetchone()
-            if seen is not None:
+            if _seen(conn, source):
                 sources.append(source)
     return sources
 

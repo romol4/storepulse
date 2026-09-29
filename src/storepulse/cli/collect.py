@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+from collections.abc import Callable
 from datetime import date, timedelta
 
 from storepulse.cli.common import (
@@ -18,6 +19,8 @@ from storepulse.cli.common import (
 from storepulse.core import config, db, discovery, runner
 from storepulse.core.sources import (
     apple_sales,
+    apple_subscription_events,
+    apple_subscriptions,
     play_earnings,
     play_installs,
     play_sales,
@@ -27,8 +30,9 @@ from storepulse.core.sources.google_auth import GoogleCredentialError, load_serv
 from storepulse.core.sources.google_client import parse_bucket_uri
 from storepulse.core.sources.play_common import Month, last_months, month_range
 
+APPLE_DAILY = (apple_sales.SOURCE, apple_subscriptions.SOURCE, apple_subscription_events.SOURCE)
 PLAY_MONTHLY = (play_installs.SOURCE, play_sales.SOURCE, play_earnings.SOURCE)
-SOURCES = (apple_sales.SOURCE, *PLAY_MONTHLY, play_vitals.SOURCE)
+SOURCES = (*APPLE_DAILY, *PLAY_MONTHLY, play_vitals.SOURCE)
 
 
 def cmd_backfill(args: argparse.Namespace, env: Env) -> int:
@@ -37,11 +41,11 @@ def cmd_backfill(args: argparse.Namespace, env: Env) -> int:
     yesterday = env.pacific_today() - timedelta(days=1)
     conn = db.connect(config.db_path())
     try:
-        if source == apple_sales.SOURCE:
+        if source in APPLE_DAILY:
             if args.months is not None:
-                raise CliError("apple_sales takes --days or --from YYYY-MM-DD, not --months")
+                raise CliError(f"{source} takes --days or --from YYYY-MM-DD, not --months")
             start, end = _day_span(args, yesterday)
-            return backfill_apple(env, conn, cfg, start, end)
+            return backfill_apple(env, conn, cfg, source, start, end)
         if source in PLAY_MONTHLY:
             if args.days is not None:
                 raise CliError(f"{source} is loaded by month: use --months N or --from YYYY-MM")
@@ -90,9 +94,19 @@ def _month_span(args: argparse.Namespace, today: date) -> list[Month]:
 
 # -- Apple ---------------------------------------------------------------------------------
 
+# One entry per APPLE_DAILY source. apple_subscriptions/apple_subscription_events never
+# populate new_apps/remapped/unmapped_child_rows (docs/SPEC.md: they resolve apps directly
+# via App Apple ID, no parent-SKU indirection, no auto-registration) so the shared report
+# below simply prints nothing for those — no per-source branching needed there.
+_APPLE_COLLECTORS: dict[str, Callable[..., runner.RunSummary]] = {
+    apple_sales.SOURCE: runner.collect_apple_sales,
+    apple_subscriptions.SOURCE: runner.collect_apple_subscriptions,
+    apple_subscription_events.SOURCE: runner.collect_apple_subscription_events,
+}
+
 
 def backfill_apple(
-    env: Env, conn: sqlite3.Connection, cfg: config.Config, start: date, end: date
+    env: Env, conn: sqlite3.Connection, cfg: config.Config, source: str, start: date, end: date
 ) -> int:
     if cfg.apple is None:
         raise CliError("Apple isn't set up yet; run `storepulse init` first")
@@ -107,15 +121,16 @@ def backfill_apple(
     if span.skipped:
         first, last = span.skipped
         env.warn(
-            "Apple keeps daily sales reports for about a year; "
+            "Apple keeps daily reports for about a year; "
             f"skipped {first} to {last} (not requested, nothing recorded)."
         )
     if not span.dates:
         env.say("Nothing to load.")
         return 0
-    env.say(f"Loading apple_sales {span.dates[0]} > {span.dates[-1]} ({len(span.dates)} days)...")
+    env.say(f"Loading {source} {span.dates[0]} > {span.dates[-1]} ({len(span.dates)} days)...")
+    collect = _APPLE_COLLECTORS[source]
     with apple_client(env, cfg.apple, p8) as client:
-        summary = runner.collect_apple_sales(
+        summary = collect(
             conn,
             client,
             cfg.apple.vendor_number,
@@ -127,7 +142,7 @@ def backfill_apple(
     env.say()
     env.say(
         f"Done: {summary.ok} days loaded ({summary.rows} rows), "
-        f"{summary.no_sales + summary.inferred_no_sales} with no sales, "
+        f"{summary.no_sales + summary.inferred_no_sales} with nothing reported, "
         f"{len(summary.not_ready)} not ready, {len(summary.errors)} errors."
     )
     if summary.new_apps:
@@ -139,10 +154,16 @@ def backfill_apple(
         )
     if summary.unknown_types:
         codes = ", ".join(f"{c} ({n} rows)" for c, n in sorted(summary.unknown_types.items()))
-        env.warn(
-            f"unrecognized product types (only proceeds counted): {codes}. "
-            "Please report them so they can be mapped."
-        )
+        if source == apple_subscription_events.SOURCE:
+            env.warn(
+                f"unrecognized subscription events (not counted toward churn): {codes}. "
+                "Please report them so they can be classified."
+            )
+        else:
+            env.warn(
+                f"unrecognized product types (only proceeds counted): {codes}. "
+                "Please report them so they can be mapped."
+            )
     if summary.remapped:
         env.say(
             f"Re-mapped in-app purchases for {len(summary.remapped)} day(s) once their "
