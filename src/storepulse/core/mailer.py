@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import smtplib
+import socket
 import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
@@ -74,7 +76,45 @@ def _wrap(config: EmailConfig, what: str, exc: Exception) -> MailerError:
     )
 
 
+def _reject_link_local(host: str) -> None:
+    """Block the cloud-metadata-endpoint SSRF vector (169.254.169.254 and friends).
+
+    RFC1918 and loopback stay reachable on purpose: a self-hosted relay on the same
+    private network as the container is a plausible, legitimate setup for this tool,
+    and the admin entering the host is already at the same trust level as whoever
+    deployed the container.
+
+    An IP-literal host is checked directly, with no DNS lookup at all. A hostname is
+    resolved once, here, before connecting; smtplib resolves it again moments later to
+    actually connect, and that second lookup could in principle return something
+    different (DNS rebinding) — see SECURITY.md for why that residual gap is accepted
+    rather than closed.
+    """
+    try:
+        addresses = [str(ipaddress.ip_address(host))]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return  # let the real connection attempt below produce its own clear error
+        raw = [info[4][0] for info in infos]
+        addresses = [a.split("%", 1)[0] for a in raw if isinstance(a, str)]  # drop an IPv6 zone id
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_link_local:
+            raise MailerError(
+                redact(
+                    f"refusing to connect to {host}: resolves to a link-local address "
+                    f"({address}). {DOCS_HINT}"
+                )
+            )
+
+
 def _connect(config: EmailConfig, factory: SMTPFactory | None) -> SMTPLike:
+    _reject_link_local(config.host)
     make = factory or default_factory(config)
     try:
         client = make(config.host, config.port, DEFAULT_TIMEOUT)
