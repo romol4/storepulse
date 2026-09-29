@@ -14,6 +14,7 @@ rows rank individual ``apps`` rows independently.
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from email.message import EmailMessage
@@ -22,6 +23,8 @@ from html import escape
 from storepulse.core import charts, config
 from storepulse.core.sources import (
     apple_sales,
+    apple_subscription_events,
+    apple_subscriptions,
     play_earnings,
     play_installs,
     play_sales,
@@ -33,9 +36,12 @@ WARNING = "⚠"
 _MINUS = "−"  # noqa: RUF001 (docs/SPEC.md's own example uses U+2212, not a hyphen)
 _DOT = "·"
 _APPROX = "≈"
+_NO_DATA = "—"
 
 _WINDOW_DAYS = 7
 _SPARKLINE_DAYS = 30
+# _build_app_rows slices both 7-day windows out of the sparkline series.
+assert _SPARKLINE_DAYS >= 2 * _WINDOW_DAYS
 _LABEL_WIDTH = 10
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -52,6 +58,8 @@ _CURRENCY_SYMBOLS = {
 
 _SOURCE_LABELS = {
     apple_sales.SOURCE: "apple_sales",
+    apple_subscriptions.SOURCE: "apple_subscriptions",
+    apple_subscription_events.SOURCE: "apple_subscription_events",
     play_installs.SOURCE: "play_installs",
     play_sales.SOURCE: "play_sales",
     play_earnings.SOURCE: "play_earnings",
@@ -63,6 +71,8 @@ _SOURCE_LABELS = {
 # by the 15th of the month following it, i.e. the 15th of the current month.
 _SOURCE_CADENCE = {
     apple_sales.SOURCE: "daily",
+    apple_subscriptions.SOURCE: "daily",
+    apple_subscription_events.SOURCE: "daily",
     play_installs.SOURCE: "monthly",
     play_sales.SOURCE: "monthly",
     play_earnings.SOURCE: "earnings",
@@ -89,6 +99,13 @@ class AppRow:
     crash_rate_28d: float | None = None
     anr_rate: float | None = None
     anr_rate_28d: float | None = None
+    store_id: str = ""
+    prev_installs: float = 0.0
+
+    @property
+    def active(self) -> bool:
+        """Anything to show for this app in either week."""
+        return bool(self.installs or self.prev_installs or self.proceeds)
 
 
 @dataclass
@@ -114,6 +131,10 @@ class _Context:
     vitals_warnings: list[str]
     data_line: str
     app_rows: list[AppRow]
+    # Configured platforms that have never loaded data (e.g. Play bucket access pending):
+    # shown as "—", never as a real 0, and left out of the combined totals.
+    unavailable: frozenset[str] = frozenset()
+    quiet_apps: int = 0  # apps collapsed into "+N more" (no installs or proceeds either week)
 
 
 # -- formatting helpers ----------------------------------------------------------------
@@ -138,6 +159,10 @@ def _format_money(currency: str, amount: float) -> str:
     if symbol is not None:
         return f"{symbol}{amount:,.2f}"
     return f"{amount:,.2f} {currency}".strip()
+
+
+def _installs_text(count: float) -> str:
+    return f"{count:.0f} install" + ("" if round(count) == 1 else "s")
 
 
 def _money_with_trend(currency: str, current: float, previous: float) -> str:
@@ -327,14 +352,17 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
 
 
 def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> list[AppRow]:
-    apps = conn.execute("SELECT id, name, platform FROM apps ORDER BY name").fetchall()
+    apps = conn.execute("SELECT id, name, platform, store_id FROM apps ORDER BY name").fetchall()
     rows: list[AppRow] = []
     for record in apps:
         app_id, name, platform = int(record["id"]), str(record["name"]), str(record["platform"])
         source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
         all_only = platform == "android"
-        installs = _window_total(conn, source, "installs", window, all_only=all_only, app_id=app_id)
+        # The 30-day sparkline series ends on as_of, so it already holds both 7-day
+        # windows; slice it instead of querying each window again.
         series = _daily_series(conn, source, app_id, all_only=all_only, end=as_of)
+        installs = sum(series[-_WINDOW_DAYS:])
+        prev_installs = sum(series[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
         proceeds = (
             _window_by_currency(conn, apple_sales.SOURCE, "proceeds", window, app_id=app_id)
             if platform == "ios"
@@ -348,6 +376,8 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             proceeds=proceeds,
             sparkline_cid=f"app{app_id}",
             sparkline_png=charts.render_sparkline(series),
+            store_id=str(record["store_id"]),
+            prev_installs=prev_installs,
         )
         if platform == "android":
             row.crash_rate = _latest_vitals(conn, app_id, "crash_rate", as_of)
@@ -355,8 +385,39 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             row.anr_rate = _latest_vitals(conn, app_id, "anr_rate", as_of)
             row.anr_rate_28d = _latest_vitals(conn, app_id, "anr_rate_28d", as_of)
         rows.append(row)
+    _disambiguate(rows)
     rows.sort(key=lambda r: (-r.installs, r.name))
     return rows
+
+
+def _disambiguate(rows: list[AppRow]) -> None:
+    """Append the store id to apps sharing a name on the same platform (e.g. two Android
+    packages both called "Bus Wise"), so their rows can be told apart."""
+    seen = Counter((r.name, r.platform) for r in rows)
+    for row in rows:
+        if seen[(row.name, row.platform)] > 1:
+            row.name = f"{row.name} [{row.store_id}]"
+
+
+def _platform_has_data(conn: sqlite3.Connection, platform: str) -> bool:
+    """Whether a platform has ever loaded data.
+
+    Deliberately not scoped to the digest window: as_of is the earliest of each
+    platform's latest day, so a stalled platform drags the window back, and checking the
+    other platform against that stale window would show it as "—" while its Data-line
+    entry says ok. Apple writes no rows on zero-sales days, so a successful pull counts.
+    """
+    source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
+    if conn.execute("SELECT 1 FROM daily_metrics WHERE source = ? LIMIT 1", (source,)).fetchone():
+        return True
+    if platform == "ios":
+        return (
+            conn.execute(
+                "SELECT 1 FROM ingest_log WHERE source = ? AND status = 'ok' LIMIT 1", (source,)
+            ).fetchone()
+            is not None
+        )
+    return False
 
 
 def _vitals_warnings(app_rows: list[AppRow], digest_cfg: config.DigestConfig) -> list[str]:
@@ -376,17 +437,26 @@ def _vitals_warnings(app_rows: list[AppRow], digest_cfg: config.DigestConfig) ->
 # -- source freshness (docs/SPEC.md, Scheduling and reliability) -----------------------
 
 
+def _seen(conn: sqlite3.Connection, source: str) -> bool:
+    row = conn.execute("SELECT 1 FROM ingest_log WHERE source = ? LIMIT 1", (source,)).fetchone()
+    return row is not None
+
+
 def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[str]:
     sources: list[str] = []
     if cfg.apple is not None:
         sources.append(apple_sales.SOURCE)
+        # Unlike apple_sales, shown only once seen: not every app has subscription
+        # products, and an account with none may get an ambiguous 404 rather than a
+        # clean empty report, so showing these unconditionally risked permanent
+        # false "not_ready" noise for developers with no subscriptions at all.
+        for source in (apple_subscriptions.SOURCE, apple_subscription_events.SOURCE):
+            if _seen(conn, source):
+                sources.append(source)
     if cfg.google is not None:
         sources += [play_installs.SOURCE, play_vitals.SOURCE]
         for source in (play_sales.SOURCE, play_earnings.SOURCE):
-            seen = conn.execute(
-                "SELECT 1 FROM ingest_log WHERE source = ? LIMIT 1", (source,)
-            ).fetchone()
-            if seen is not None:
+            if _seen(conn, source):
                 sources.append(source)
     return sources
 
@@ -457,6 +527,13 @@ def _source_note(
     return has_error is not None, ok_row["d"], not_ready_row["d"]
 
 
+def _has_rows_since(conn: sqlite3.Connection, source: str, start: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM daily_metrics WHERE source = ? AND date >= ? LIMIT 1", (source, start)
+    ).fetchone()
+    return row is not None
+
+
 def _is_overdue(source: str, latest_ok: str | None, today: date, stale_days: int) -> bool:
     cadence = _SOURCE_CADENCE[source]
     if cadence == "daily":
@@ -480,6 +557,12 @@ def _source_status_text(
     if _is_overdue(source, latest_ok, today, stale_days):
         return f"{label} not_ready"
     note = ""
+    if source == play_vitals.SOURCE and not _has_rows_since(
+        conn, source, _window_bounds(source, today, days)[0]
+    ):
+        # Collected fine, but Google returned no values (common below its minimum
+        # user count): say so rather than a bare "ok".
+        return f"{label} ok (no data from Google)"
     if latest_not_ready is not None and (latest_ok is None or latest_not_ready > latest_ok):
         note = f" ({_short_date(date.fromisoformat(latest_not_ready))} not ready)"
     else:
@@ -508,16 +591,35 @@ def _data_line(conn: sqlite3.Connection, cfg: config.Config, today: date, as_of:
 # -- rendering ---------------------------------------------------------------------------
 
 
+def _installs_summary(ctx: _Context) -> tuple[float, float, list[str]]:
+    """(combined, previous combined, per-platform parts). A platform without data is
+    shown as "—" and left out of both totals, so the trend compares like with like."""
+    combined = prev_combined = 0.0
+    parts: list[str] = []
+    for platform, label, configured, current, previous in (
+        ("ios", "iOS", ctx.cfg.apple, ctx.ios_installs, ctx.prev_ios_installs),
+        ("android", "Android", ctx.cfg.google, ctx.android_installs, ctx.prev_android_installs),
+    ):
+        if configured is None:
+            continue
+        if platform in ctx.unavailable:
+            parts.append(f"{label} {_NO_DATA}")
+            continue
+        combined += current
+        prev_combined += previous
+        parts.append(f"{label} {current:.0f}")
+    return combined, prev_combined, parts
+
+
+def _quiet_apps_text(count: int) -> str:
+    noun = "app" if count == 1 else "apps"
+    return f"+{count} more {noun} with no installs or proceeds in either week"
+
+
 def _render_text(ctx: _Context) -> str:
     lines = [f"Storepulse {_DOT} {_format_header_date(ctx.as_of)}"]
 
-    combined = ctx.ios_installs + ctx.android_installs
-    prev_combined = ctx.prev_ios_installs + ctx.prev_android_installs
-    breakdown_parts = []
-    if ctx.cfg.apple is not None:
-        breakdown_parts.append(f"iOS {ctx.ios_installs:.0f}")
-    if ctx.cfg.google is not None:
-        breakdown_parts.append(f"Android {ctx.android_installs:.0f}")
+    combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f"   {f' {_DOT} '.join(breakdown_parts)}" if breakdown_parts else ""
     lines.append(
         f"{_label('Installs')}{combined:.0f}{_trend_suffix(combined, prev_combined)}{breakdown}"
@@ -540,7 +642,9 @@ def _render_text(ctx: _Context) -> str:
         )
 
     if ctx.top_app is not None:
-        lines.append(f"{_label('Top app')}{ctx.top_app.name} {ctx.top_app.installs:.0f} installs")
+        lines.append(
+            f"{_label('Top app')}{ctx.top_app.name} {_installs_text(ctx.top_app.installs)}"
+        )
 
     if ctx.vitals_warnings:
         lines.append(f"{_label('Vitals')}{'; '.join(ctx.vitals_warnings)}")
@@ -548,7 +652,7 @@ def _render_text(ctx: _Context) -> str:
     if ctx.data_line:
         lines.append(f"{_label('Data')}{ctx.data_line}")
 
-    if ctx.app_rows:
+    if ctx.app_rows or ctx.quiet_apps:
         lines.append("")
         lines.append("Apps")
         for row in ctx.app_rows:
@@ -559,8 +663,10 @@ def _render_text(ctx: _Context) -> str:
                 else "no proceeds"
             )
             lines.append(
-                f"  {row.name} ({platform_label}): {row.installs:.0f} installs, {proceeds_text}"
+                f"  {row.name} ({platform_label}): {_installs_text(row.installs)}, {proceeds_text}"
             )
+        if ctx.quiet_apps:
+            lines.append(f"  {_quiet_apps_text(ctx.quiet_apps)}")
 
     return "\n".join(lines) + "\n"
 
@@ -570,13 +676,7 @@ def _html_escape(text: str) -> str:
 
 
 def _render_html(ctx: _Context) -> str:
-    combined = ctx.ios_installs + ctx.android_installs
-    prev_combined = ctx.prev_ios_installs + ctx.prev_android_installs
-    breakdown_parts = []
-    if ctx.cfg.apple is not None:
-        breakdown_parts.append(f"iOS {ctx.ios_installs:.0f}")
-    if ctx.cfg.google is not None:
-        breakdown_parts.append(f"Android {ctx.android_installs:.0f}")
+    combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f" &mdash; {' &middot; '.join(breakdown_parts)}" if breakdown_parts else ""
 
     rows_html = []
@@ -612,9 +712,15 @@ def _render_html(ctx: _Context) -> str:
             f'alt="30-day installs trend" style="display:block;"></td>'
             '<td style="padding:8px 12px;border-bottom:1px solid #eee;">'
             f"<strong>{_html_escape(row.name)}</strong> ({platform_label})<br>"
-            f"{row.installs:.0f} installs, {_html_escape(proceeds_text)}"
+            f"{_installs_text(row.installs)}, {_html_escape(proceeds_text)}"
             f"{vitals_text}</td>"
             "</tr>"
+        )
+
+    if ctx.quiet_apps:
+        rows_html.append(
+            '<tr><td></td><td style="padding:8px 12px;color:#666;">'
+            f"{_quiet_apps_text(ctx.quiet_apps)}</td></tr>"
         )
 
     warnings_html = ""
@@ -647,7 +753,7 @@ def _render_html(ctx: _Context) -> str:
     if ctx.top_app is not None:
         top_app_html = (
             f"<p>Top app: <strong>{_html_escape(ctx.top_app.name)}</strong> "
-            f"{ctx.top_app.installs:.0f} installs</p>"
+            f"{_installs_text(ctx.top_app.installs)}</p>"
         )
 
     return (
@@ -691,7 +797,16 @@ def build_digest(
         window.start - timedelta(days=_WINDOW_DAYS), window.start - timedelta(days=1)
     )
 
-    app_rows = _build_app_rows(conn, as_of, window)
+    unavailable = frozenset(
+        platform
+        for platform, configured in (("ios", cfg.apple), ("android", cfg.google))
+        if configured is not None and not _platform_has_data(conn, platform)
+    )
+    all_rows = _build_app_rows(conn, as_of, window)
+    # Apps of a platform without data are left out (the Data line says why); apps with
+    # nothing in either week are collapsed into one "+N more" line.
+    app_rows = [r for r in all_rows if r.platform not in unavailable and r.active]
+    quiet_apps = sum(1 for r in all_rows if r.platform not in unavailable and not r.active)
     ctx = _Context(
         as_of=as_of,
         cfg=cfg,
@@ -703,9 +818,13 @@ def build_digest(
         prev_proceeds=_proceeds_by_currency(conn, prev_window),
         sales_gross=_window_by_currency(conn, play_sales.SOURCE, "sales_gross", window),
         top_app=app_rows[0] if app_rows else None,
-        vitals_warnings=_vitals_warnings(app_rows, cfg.digest),
+        # All apps: crash/ANR rates come from the Reporting API, independent of installs
+        # (a quiet app, or a platform whose bucket is unreachable, can still be crashing).
+        vitals_warnings=_vitals_warnings(all_rows, cfg.digest),
         data_line=_data_line(conn, cfg, today, as_of),
         app_rows=app_rows,
+        unavailable=unavailable,
+        quiet_apps=quiet_apps,
     )
     return Digest(
         as_of=as_of,

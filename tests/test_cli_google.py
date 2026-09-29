@@ -173,6 +173,17 @@ def test_backfill_play_sources(memory_keyring: MemoryKeyring, sa_file: Path) -> 
     assert "not ready" in _out(env)
 
 
+def test_backfill_403_is_reported_once(memory_keyring: MemoryKeyring, sa_file: Path) -> None:
+    """Dogfood follow-up: a bucket 403 used to print twice per app (an ERROR log line and
+    the summary warning); now it's one grouped warning."""
+    _setup_google(sa_file)
+    env = _env([], google=FakeGoogle(objects=standard_objects(), gcs_status=403))
+    assert main(["backfill", "--source", "play_installs", "--months", "1"], env) == 1
+    err = _err(env)
+    assert err.count("HTTP 403") == 1, err
+    assert "ERROR:" not in err
+
+
 def test_backfill_argument_errors(memory_keyring: MemoryKeyring, sa_file: Path) -> None:
     _setup_google(sa_file)
     env = _env([], google=FakeGoogle())

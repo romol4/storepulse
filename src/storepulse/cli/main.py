@@ -41,9 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
         "backfill",
         help="load historical data for a source",
         description=(
-            "apple_sales and play_vitals load by day (--days N, or --from YYYY-MM-DD "
-            "[--to YYYY-MM-DD]); play_installs, play_sales and play_earnings load by month "
-            "(--months N, or --from YYYY-MM [--to YYYY-MM])."
+            "apple_sales, apple_subscriptions, apple_subscription_events and play_vitals load "
+            "by day (--days N, or --from YYYY-MM-DD [--to YYYY-MM-DD]); play_installs, "
+            "play_sales and play_earnings load by month (--months N, or --from YYYY-MM "
+            "[--to YYYY-MM])."
         ),
     )
     backfill.add_argument("--source", required=True, choices=SOURCES)

@@ -17,6 +17,8 @@ from storepulse.core import config, db, digest, discovery, mailer
 from storepulse.core.secrets import redact
 from storepulse.core.sources import (
     apple_sales,
+    apple_subscription_events,
+    apple_subscriptions,
     play_earnings,
     play_installs,
     play_sales,
@@ -183,7 +185,8 @@ def collect_apple_sales(
             raise
         except Exception as exc:
             message = redact(f"{type(exc).__name__}: {exc}")
-            log.error("%s %s failed: %s", source, iso, message)
+            # Reported by the caller (grouped with group_errors); info avoids printing twice.
+            log.info("%s %s failed: %s", source, iso, message)
             summary.errors.append((day, message))
             db.log_ingest(
                 conn,
@@ -234,6 +237,267 @@ def _remap_pending(
             progress(day, f"re-mapped in-app purchases, {written} rows")
 
 
+def collect_apple_subscriptions(
+    conn: sqlite3.Connection,
+    client: AppleClient,
+    vendor_number: str,
+    dates: Iterable[date],
+    *,
+    delay: float = 1.0,
+    sleep: Callable[[float], None] | None = None,
+    today: date | None = None,
+    progress: Callable[[date, str], None] | None = None,
+) -> RunSummary:
+    """Pull and store each date independently; one bad date never stops the rest.
+
+    Shaped like collect_apple_sales, but simpler: this source resolves apps directly via
+    App Apple ID (docs/SPEC.md), so there is no parent-SKU indirection to re-map and no new
+    app is ever registered. RunSummary's unmapped_child_rows, remapped, new_apps and
+    unknown_types stay at their defaults for this source.
+    """
+    sleep = sleep or time.sleep
+    source = apple_subscriptions.SOURCE
+    summary = RunSummary()
+    for i, day in enumerate(dates):
+        if i and delay:
+            sleep(delay)
+        iso = day.isoformat()
+        started = db.utc_now()
+        try:
+            fetched = apple_subscriptions.fetch_day(client, vendor_number, day, today=today)
+            if fetched.status == "ok":
+                report = apple_subscriptions.parse_summary(
+                    apple_sales.decode_report(fetched.content)
+                )
+                mapped = apple_subscriptions.map_rows(conn, day, report)
+                written = db.replace_source_day(conn, source, iso, mapped.rows)
+                if mapped.unmapped_rows:
+                    log.warning(
+                        "%s %s: %d rows matched no known app", source, iso, mapped.unmapped_rows
+                    )
+                summary.unmapped_rows += mapped.unmapped_rows
+                summary.ok += 1
+                summary.rows += written
+                db.log_ingest(
+                    conn,
+                    source=source,
+                    report_date=iso,
+                    started_at=started,
+                    status="ok",
+                    rows=written,
+                    note=mapped.note(),
+                )
+                outcome = f"ok, {written} rows"
+            elif fetched.status == "no_sales":
+                db.replace_source_day(conn, source, iso, [])
+                summary.ok += 1
+                summary.no_sales += 1
+                db.log_ingest(
+                    conn, source=source, report_date=iso, started_at=started, status="ok", rows=0
+                )
+                outcome = "no sales"
+            elif fetched.status == "no_sales_inferred":
+                summary.ok += 1
+                summary.inferred_no_sales += 1
+                existing = db.count_source_day(conn, source, iso)
+                if existing:
+                    summary.kept_rows.append(day)
+                    note = f"404 without 'no sales' text; kept {existing} stored rows"
+                    log.warning("%s %s: %s", source, iso, note)
+                    outcome = f"404, kept {existing} stored rows"
+                else:
+                    note = "no sales (inferred from date)"
+                    outcome = "no sales (inferred)"
+                db.log_ingest(
+                    conn,
+                    source=source,
+                    report_date=iso,
+                    started_at=started,
+                    status="ok",
+                    rows=0,
+                    note=note,
+                )
+            else:
+                summary.not_ready.append(day)
+                db.log_ingest(
+                    conn, source=source, report_date=iso, started_at=started, status="not_ready"
+                )
+                outcome = "not ready yet"
+        except (AppleAuthError, AppleVendorError) as exc:
+            db.log_ingest(
+                conn,
+                source=source,
+                report_date=iso,
+                started_at=started,
+                status="error",
+                note=redact(str(exc)),
+            )
+            raise
+        except Exception as exc:
+            message = redact(f"{type(exc).__name__}: {exc}")
+            log.info("%s %s failed: %s", source, iso, message)
+            summary.errors.append((day, message))
+            db.log_ingest(
+                conn,
+                source=source,
+                report_date=iso,
+                started_at=started,
+                status="error",
+                note=message,
+            )
+            outcome = "error"
+        if progress:
+            progress(day, outcome)
+    return summary
+
+
+def collect_apple_subscription_events(
+    conn: sqlite3.Connection,
+    client: AppleClient,
+    vendor_number: str,
+    dates: Iterable[date],
+    *,
+    delay: float = 1.0,
+    sleep: Callable[[float], None] | None = None,
+    today: date | None = None,
+    progress: Callable[[date, str], None] | None = None,
+) -> RunSummary:
+    """Pull and store each date independently; one bad date never stops the rest.
+
+    Shaped like collect_apple_sales, but simpler (see collect_apple_subscriptions). Unlike
+    that source, this one does classify a code value (the Event column): an event outside
+    the churn and other-recognized sets populates RunSummary.unknown_types, the same
+    treatment collect_apple_sales gives an unrecognized Product Type Identifier.
+    """
+    sleep = sleep or time.sleep
+    source = apple_subscription_events.SOURCE
+    summary = RunSummary()
+    for i, day in enumerate(dates):
+        if i and delay:
+            sleep(delay)
+        iso = day.isoformat()
+        started = db.utc_now()
+        try:
+            fetched = apple_subscription_events.fetch_day(client, vendor_number, day, today=today)
+            if fetched.status == "ok":
+                report = apple_subscription_events.parse_summary(
+                    apple_sales.decode_report(fetched.content)
+                )
+                mapped = apple_subscription_events.map_rows(conn, day, report)
+                written = db.replace_source_day(conn, source, iso, mapped.rows)
+                for event, count in sorted(mapped.unknown_events.items()):
+                    log.warning(
+                        "%s %s: unrecognized event %r in %d rows (quantity %d)",
+                        source,
+                        iso,
+                        event,
+                        count,
+                        mapped.unknown_quantities[event],
+                    )
+                if mapped.unmapped_rows:
+                    log.warning(
+                        "%s %s: %d rows matched no known app", source, iso, mapped.unmapped_rows
+                    )
+                summary.unknown_types.update(mapped.unknown_events)
+                summary.unmapped_rows += mapped.unmapped_rows
+                summary.ok += 1
+                summary.rows += written
+                db.log_ingest(
+                    conn,
+                    source=source,
+                    report_date=iso,
+                    started_at=started,
+                    status="ok",
+                    rows=written,
+                    note=mapped.note(),
+                )
+                outcome = f"ok, {written} rows"
+            elif fetched.status == "no_sales":
+                db.replace_source_day(conn, source, iso, [])
+                summary.ok += 1
+                summary.no_sales += 1
+                db.log_ingest(
+                    conn, source=source, report_date=iso, started_at=started, status="ok", rows=0
+                )
+                outcome = "no sales"
+            elif fetched.status == "no_sales_inferred":
+                summary.ok += 1
+                summary.inferred_no_sales += 1
+                existing = db.count_source_day(conn, source, iso)
+                if existing:
+                    summary.kept_rows.append(day)
+                    note = f"404 without 'no sales' text; kept {existing} stored rows"
+                    log.warning("%s %s: %s", source, iso, note)
+                    outcome = f"404, kept {existing} stored rows"
+                else:
+                    note = "no sales (inferred from date)"
+                    outcome = "no sales (inferred)"
+                db.log_ingest(
+                    conn,
+                    source=source,
+                    report_date=iso,
+                    started_at=started,
+                    status="ok",
+                    rows=0,
+                    note=note,
+                )
+            else:
+                summary.not_ready.append(day)
+                db.log_ingest(
+                    conn, source=source, report_date=iso, started_at=started, status="not_ready"
+                )
+                outcome = "not ready yet"
+        except (AppleAuthError, AppleVendorError) as exc:
+            db.log_ingest(
+                conn,
+                source=source,
+                report_date=iso,
+                started_at=started,
+                status="error",
+                note=redact(str(exc)),
+            )
+            raise
+        except Exception as exc:
+            message = redact(f"{type(exc).__name__}: {exc}")
+            log.info("%s %s failed: %s", source, iso, message)
+            summary.errors.append((day, message))
+            db.log_ingest(
+                conn,
+                source=source,
+                report_date=iso,
+                started_at=started,
+                status="error",
+                note=message,
+            )
+            outcome = "error"
+        if progress:
+            progress(day, outcome)
+    return summary
+
+
+def group_errors(errors: Iterable[tuple[object, str]]) -> list[str]:
+    """One line per distinct failure.
+
+    The same failure for many apps or days (e.g. a bucket 403 before Play permissions
+    take effect) becomes one line naming them all, instead of one wall of text each.
+    Each error's subject (its label's first word: a package, date or month) is blanked
+    out of the message so identical failures compare equal.
+    """
+    groups: dict[str, tuple[str, list[str]]] = {}
+    for label, message in errors:
+        text = str(label)
+        subject = text.split()[0] if text.strip() else ""
+        key = message.replace(subject, "…") if subject else message
+        groups.setdefault(key, (message, []))[1].append(text)
+    lines = []
+    for key, (first_message, labels) in groups.items():
+        if len(labels) == 1:
+            lines.append(f"{labels[0]}: {first_message}")
+        else:
+            lines.append(f"{len(labels)} failed the same way ({', '.join(labels)}): {key}")
+    return lines
+
+
 # -- Google Play ---------------------------------------------------------------------------
 
 
@@ -266,7 +530,7 @@ def _error(
     app_id: int | None = None,
 ) -> None:
     message = redact(f"{type(exc).__name__}: {exc}")
-    log.error("%s %s failed: %s", summary.source, label, message)
+    log.info("%s %s failed: %s", summary.source, label, message)  # caller reports it
     summary.errors.append((label, message))
     db.log_ingest(
         conn,
@@ -644,7 +908,8 @@ def collect_play_vitals(
                     app_id=app_id,
                 )
         if progress:
-            progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready")
+            no_data = ", no data from Google" if ready and not rows else ""
+            progress(package, f"{len(ready)} days ok, {len(dates) - len(ready)} not ready{no_data}")
     return summary
 
 
@@ -737,7 +1002,73 @@ def _run_apple(
         log.error("apple_sales failed: %s", message)
         return f"apple_sales: {message}"
     if summary.errors:
-        return f"apple_sales: {len(summary.errors)} of {len(dates)} day(s) failed"
+        return f"apple_sales: {len(summary.errors)} of {len(dates)} day(s) failed: " + "; ".join(
+            group_errors(summary.errors)
+        )
+    return None
+
+
+def _run_apple_subscriptions(
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    client: AppleClient,
+    days: int,
+    today: date,
+    progress: Callable[[str, str], None],
+) -> str | None:
+    assert cfg.apple is not None
+    yesterday = today - timedelta(days=1)
+    dates = [yesterday - timedelta(days=i) for i in reversed(range(days))]
+    try:
+        summary = collect_apple_subscriptions(
+            conn,
+            client,
+            cfg.apple.vendor_number,
+            dates,
+            today=today,
+            progress=lambda d, outcome: progress(d.isoformat(), outcome),
+        )
+    except Exception as exc:  # one failing source never blocks the others or the digest
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("apple_subscriptions failed: %s", message)
+        return f"apple_subscriptions: {message}"
+    if summary.errors:
+        return (
+            f"apple_subscriptions: {len(summary.errors)} of {len(dates)} day(s) failed: "
+            + "; ".join(group_errors(summary.errors))
+        )
+    return None
+
+
+def _run_apple_subscription_events(
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    client: AppleClient,
+    days: int,
+    today: date,
+    progress: Callable[[str, str], None],
+) -> str | None:
+    assert cfg.apple is not None
+    yesterday = today - timedelta(days=1)
+    dates = [yesterday - timedelta(days=i) for i in reversed(range(days))]
+    try:
+        summary = collect_apple_subscription_events(
+            conn,
+            client,
+            cfg.apple.vendor_number,
+            dates,
+            today=today,
+            progress=lambda d, outcome: progress(d.isoformat(), outcome),
+        )
+    except Exception as exc:  # one failing source never blocks the others or the digest
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("apple_subscription_events failed: %s", message)
+        return f"apple_subscription_events: {message}"
+    if summary.errors:
+        return (
+            f"apple_subscription_events: {len(summary.errors)} of {len(dates)} day(s) failed: "
+            + "; ".join(group_errors(summary.errors))
+        )
     return None
 
 
@@ -758,7 +1089,7 @@ def _run_play_source(
         log.error("%s failed: %s", label, message)
         return f"{label}: {message}"
     if summary.errors:
-        return f"{label}: {len(summary.errors)} failed"
+        return f"{label}: {len(summary.errors)} failed: " + "; ".join(group_errors(summary.errors))
     return None
 
 
@@ -775,7 +1106,9 @@ def _run_play_vitals(
         log.error("play_vitals failed: %s", message)
         return f"play_vitals: {message}"
     if summary.errors:
-        return f"play_vitals: {len(summary.errors)} failed"
+        return f"play_vitals: {len(summary.errors)} failed: " + "; ".join(
+            group_errors(summary.errors)
+        )
     return None
 
 
@@ -806,9 +1139,14 @@ def run_all(
 
     with _run_lock(config.data_dir()):
         if cfg.apple is not None and apple_client is not None:
-            error = _run_apple(conn, cfg, apple_client, days, today, report)
-            if error:
-                result.errors.append(error)
+            for run_source in (
+                _run_apple,
+                _run_apple_subscriptions,
+                _run_apple_subscription_events,
+            ):
+                error = run_source(conn, cfg, apple_client, days, today, report)
+                if error:
+                    result.errors.append(error)
 
         if cfg.google is not None and google_client is not None:
             bucket = parse_bucket_uri(cfg.google.bucket_uri)

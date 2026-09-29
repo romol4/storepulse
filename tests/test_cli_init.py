@@ -16,6 +16,8 @@ from conftest import (
     MemoryKeyring,
     apple_error,
     fixture_bytes,
+    subscription_events_fixture_bytes,
+    subscriptions_fixture_bytes,
 )
 from storepulse.cli.main import Env, main
 from storepulse.core import config, db
@@ -194,6 +196,38 @@ def test_backfill_days(memory_keyring: MemoryKeyring, p8_file: Path) -> None:
     assert main(["backfill", "--source", "apple_sales", "--days", "3"], env) == 0
     assert fake.sales_dates() == [(TODAY - timedelta(days=d)).isoformat() for d in (3, 2, 1)]
     assert "ZZ9" in _err(env)  # unknown product types are surfaced
+
+
+def test_backfill_routes_apple_subscriptions_to_apple(
+    memory_keyring: MemoryKeyring, p8_file: Path
+) -> None:
+    # Google is never configured in this flow: apple_subscriptions must route to
+    # backfill_apple, not fall through to backfill_play (which would demand Google creds).
+    _init(p8_file)
+    fake = FakeApple(
+        default_subscriptions_report=subscriptions_fixture_bytes("summary_normal.tsv.gz")
+    )
+    env = _env(fake, [])
+    assert main(["backfill", "--source", "apple_subscriptions", "--days", "3"], env) == 0
+    assert fake.dates_for("SUBSCRIPTION") == [
+        (TODAY - timedelta(days=d)).isoformat() for d in (3, 2, 1)
+    ]
+
+
+def test_backfill_routes_apple_subscription_events_to_apple(
+    memory_keyring: MemoryKeyring, p8_file: Path
+) -> None:
+    _init(p8_file)
+    fake = FakeApple(
+        default_subscription_events_report=subscription_events_fixture_bytes(
+            "summary_normal.tsv.gz"
+        )
+    )
+    env = _env(fake, [])
+    assert main(["backfill", "--source", "apple_subscription_events", "--days", "3"], env) == 0
+    assert fake.dates_for("SUBSCRIPTION_EVENT") == [
+        (TODAY - timedelta(days=d)).isoformat() for d in (3, 2, 1)
+    ]
 
 
 def test_backfill_before_init() -> None:

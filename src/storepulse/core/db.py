@@ -28,6 +28,9 @@ METRICS: frozenset[str] = frozenset(
         "crash_rate_28d",
         "anr_rate_28d",
         "vitals_users",
+        "active_subscriptions",
+        "active_trials",
+        "subscription_churn",
     }
 )
 
