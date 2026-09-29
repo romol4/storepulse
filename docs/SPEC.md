@@ -254,6 +254,8 @@ Everything non-secret that local mode keeps in `config.toml` lives here instead:
 
 The `apps` table gains `display_name`, `pair_key` (links an iOS and Android app into one logical app), `hidden`, and `pair_source` (`'auto'` or `'user'`; NULL until discovery or a user first decides). `pair_source` records whether the current `pair_key` value — a pairing, or a deliberate non-pairing, since a user can leave `pair_key` NULL with `pair_source='user'` to override a would-be auto-pair — was a user's choice or `discovery.py`'s guess. Auto-pairing may only set or change `pair_key` while `pair_source` is NULL or `'auto'`; once it's `'user'`, auto-pairing leaves that app alone, which is how it stays idempotent against a user's own choices on every re-run (Data sources).
 
+Hiding an app (`hidden = 1`) removes it from every list: the digest's per-app rows and its "+N more apps" count, the dashboard's app lists and App pages, and the "top app" pick. It still counts in combined totals and trends, so the headline numbers keep matching the stores' own dashboards, and its vitals warnings still appear, since a crashing app shouldn't go quiet because it's hidden. Hiding changes neither `pair_key` nor `pair_source`.
+
 These columns, and `secrets`/`users`/`settings` above, arrive through the same migration sequence `core/db.py` applies to every database: a local-mode install picks them all up too, just unused — its CLI never writes `pair_key` (so its digest, Outputs, never merges an iOS and Android build of the same app), and its settings still round-trip through `config.toml`, not this table.
 
 ## Scheduling and reliability
