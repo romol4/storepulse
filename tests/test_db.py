@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,15 @@ def test_migrations_idempotent_and_wal(tmp_path: Path) -> None:
     assert db.migrate(conn) == 2
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     conn.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_connect_locks_down_file_and_directory_permissions(tmp_path: Path) -> None:
+    # A nested, not-yet-existing directory: connect() must create and lock it down too.
+    path = tmp_path / "nested" / "sp.db"
+    db.connect(path).close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_unknown_metric_rejected(conn: sqlite3.Connection) -> None:

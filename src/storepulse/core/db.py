@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
@@ -69,10 +70,21 @@ def _migrations() -> list[tuple[int, str]]:
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
-    """Open the database, enable WAL and foreign keys, and apply pending migrations."""
-    if str(path) != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    """Open the database, enable WAL and foreign keys, and apply pending migrations.
+
+    The database can hold plaintext sales data and, in hosted mode, encrypted secrets
+    and session token hashes, so the file and its directory are locked to the owner
+    only on every connect — not just on first creation, so permissions self-heal.
+    """
+    in_memory = str(path) == ":memory:"
+    if not in_memory:
+        directory = Path(path).parent
+        directory.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(directory, 0o700)
     conn = sqlite3.connect(str(path), isolation_level=None)
+    if not in_memory and os.name == "posix":
+        os.chmod(path, 0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

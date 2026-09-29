@@ -37,6 +37,11 @@ INFERRED_NO_SALES_AFTER_DAYS = 2
 NO_SALES_MARKERS = ("no sales",)
 NOT_READY_MARKERS = ("not available", "not yet")
 
+# A real daily report is KB to low-MB TSV text; this bounds worst-case memory use against
+# a malicious or corrupted gzip payload that expands far beyond its compressed size.
+MAX_DECOMPRESSED_BYTES = 100 * 1024 * 1024
+_GZIP_CHUNK_SIZE = 1024 * 1024
+
 # Product Type Identifiers (App Store Connect Help, "Product type identifiers").
 FIRST_TIME_TYPES = frozenset({"1", "1F", "1T", "F1", "1E", "1EP", "1EU"})
 BUNDLE_TYPES = frozenset({"1-B", "F1-B"})
@@ -161,10 +166,25 @@ def fetch_day(
     return FetchResult("ok", content=content)
 
 
+def _decompress_capped(content: bytes, limit: int) -> bytes:
+    """Decompress gzip incrementally, refusing to hold more than ``limit`` bytes."""
+    chunks: list[bytes] = []
+    total = 0
+    with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
+        while chunk := gz.read(_GZIP_CHUNK_SIZE):
+            total += len(chunk)
+            if total > limit:
+                raise ReportParseError(
+                    f"sales report exceeds the {limit // (1024 * 1024)} MB decompression limit"
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def decode_report(content: bytes) -> str:
     if content[:2] == b"\x1f\x8b":
         try:
-            content = gzip.decompress(content)
+            content = _decompress_capped(content, MAX_DECOMPRESSED_BYTES)
         except (OSError, EOFError):
             raise ReportParseError("sales report is not valid gzip") from None
     try:

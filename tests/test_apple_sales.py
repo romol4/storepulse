@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import sqlite3
 from datetime import date
 
@@ -83,6 +84,13 @@ def test_parse_rejects_blank_and_non_numeric() -> None:
 def test_decode_rejects_corrupt_gzip() -> None:
     with pytest.raises(apple_sales.ReportParseError):
         apple_sales.decode_report(b"\x1f\x8bnot gzip")
+
+
+def test_decode_rejects_oversized_gzip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(apple_sales, "MAX_DECOMPRESSED_BYTES", 1000)
+    payload = gzip.compress(b"x" * 5000)
+    with pytest.raises(apple_sales.ReportParseError, match="decompression limit"):
+        apple_sales.decode_report(payload)
 
 
 # -- mapping -----------------------------------------------------------------------------
