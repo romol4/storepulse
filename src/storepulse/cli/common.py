@@ -14,7 +14,10 @@ import httpx
 
 from storepulse.core import config, mailer
 from storepulse.core.secrets import (
+    APPLE_P8_SECRET,
+    GOOGLE_SA_SECRET,
     SECRETS_FILENAME,
+    SMTP_PASSWORD_SECRET,
     SecretStore,
     default_store,
     open_store,
@@ -23,10 +26,6 @@ from storepulse.core.sources import apple_sales
 from storepulse.core.sources.apple_client import AppleClient
 from storepulse.core.sources.google_auth import ServiceAccount
 from storepulse.core.sources.google_client import GoogleClient
-
-APPLE_P8_SECRET = "apple_p8"  # noqa: S105 (secret name, not a value)
-GOOGLE_SA_SECRET = "google_sa"  # noqa: S105 (secret name, not a value)
-SMTP_PASSWORD_SECRET = "smtp_password"  # noqa: S105 (secret name, not a value)
 
 
 @dataclass(frozen=True)
@@ -138,6 +137,9 @@ def store_for_run(env: Env, cfg: config.Config) -> SecretStore:
     if not cfg.secret_store:
         raise CliError("nothing is set up yet; run `storepulse init` first")
     return open_store(cfg.secret_store, config.config_dir(), existing_passphrase(env))
+
+
+__all__ = ["APPLE_P8_SECRET", "GOOGLE_SA_SECRET", "SMTP_PASSWORD_SECRET"]
 
 
 def apple_client(env: Env, apple: config.AppleConfig, p8: str) -> AppleClient:

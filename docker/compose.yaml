@@ -1,0 +1,49 @@
+# Storepulse hosted mode. From this directory:
+#   1. Create the master key once, and keep a copy somewhere safe:
+#        printf 'STOREPULSE_MASTER_KEY=%s\n' "$(openssl rand -base64 48)" > .env && chmod 600 .env
+#   2. docker compose up -d
+#   3. docker compose logs storepulse   # copy the one-time setup token, then open /setup
+# See README, "Hosted mode".
+
+services:
+  storepulse:
+    image: ghcr.io/romol4/storepulse:latest
+    # To build from this checkout instead: comment out `image` and uncomment `build`.
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Read only by the app's secret store. Losing it means re-entering credentials in
+      # Settings, not losing data (docs/SPEC.md, Credentials and setup).
+      STOREPULSE_MASTER_KEY: ${STOREPULSE_MASTER_KEY:?set STOREPULSE_MASTER_KEY in docker/.env}
+      # The address of your reverse proxy, so https and client IPs are seen correctly.
+      STOREPULSE_TRUSTED_PROXIES: ${STOREPULSE_TRUSTED_PROXIES:-127.0.0.1}
+    volumes:
+      - storepulse-data:/data
+    ports:
+      # Localhost only: put a reverse proxy with HTTPS in front (see Caddyfile.example).
+      - "127.0.0.1:8000:8000"
+
+  # Optional: Caddy in the same project, with automatic HTTPS. Uncomment, set your
+  # domain in Caddyfile, and set STOREPULSE_TRUSTED_PROXIES=* in .env (the app port is
+  # then only reachable through Caddy on the compose network).
+  # caddy:
+  #   image: caddy:2
+  #   restart: unless-stopped
+  #   ports: ["80:80", "443:443"]
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+
+volumes:
+  storepulse-data:
+  # caddy-data:
+
+# Prefer a Docker secret file to an environment variable? Replace STOREPULSE_MASTER_KEY
+# above with STOREPULSE_MASTER_KEY_FILE: /run/secrets/storepulse_master_key, add
+#   secrets: [storepulse_master_key]
+# to the service, and at the top level:
+#   secrets:
+#     storepulse_master_key:
+#       file: ./master_key.txt   # must be readable by the container user (uid 10001)

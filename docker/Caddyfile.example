@@ -1,0 +1,11 @@
+# Caddy obtains and renews the HTTPS certificate automatically.
+# Copy to Caddyfile and replace the domain.
+
+stats.example.com {
+	# Caddy running on the host, next to `docker compose up`:
+	reverse_proxy 127.0.0.1:8000
+	# Caddy as a service in the same compose project instead:
+	# reverse_proxy storepulse:8000
+
+	encode zstd gzip
+}

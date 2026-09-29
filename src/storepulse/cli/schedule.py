@@ -381,7 +381,16 @@ def _needs_passphrase_file(cfg: config.Config) -> bool:
     return cfg.secret_store == STORE_FILE
 
 
+def _refuse_in_hosted_mode() -> None:
+    if config.hosted_mode():
+        raise CliError(
+            "hosted mode has its own scheduler; set the daily run time in the web app's "
+            "Settings page (README, 'Hosted mode')"
+        )
+
+
 def cmd_schedule_install(args: argparse.Namespace, env: Env) -> int:
+    _refuse_in_hosted_mode()
     cfg = config.load()
     if cfg.email is None:
         raise CliError("set up email first; run `storepulse init`")
@@ -420,6 +429,7 @@ def cmd_schedule_install(args: argparse.Namespace, env: Env) -> int:
 
 
 def cmd_schedule_remove(args: argparse.Namespace, env: Env) -> int:
+    _refuse_in_hosted_mode()
     runner = _runner(env)
     if sys.platform == "darwin":
         _remove_launchd(env, runner)
@@ -434,6 +444,7 @@ def cmd_schedule_remove(args: argparse.Namespace, env: Env) -> int:
 
 
 def cmd_schedule_show(args: argparse.Namespace, env: Env) -> int:
+    _refuse_in_hosted_mode()
     cfg = config.load()
     env.say(f"Configured run time: {cfg.schedule.run_time}")
     runner = _runner(env)

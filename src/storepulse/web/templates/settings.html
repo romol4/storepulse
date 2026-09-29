@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Settings · Storepulse{% endblock %}
+{% macro reauth(saved) %}
+  {% if saved %}<label>Your admin password <span class="muted">(needed to replace the saved credential)</span>
+    <input name="admin_password" type="password" autocomplete="current-password"></label>{% endif %}
+{% endmacro %}
+{% macro saved_line(info) %}
+  {% if info %}<p class="saved">Saved {{ info.saved }} · fingerprint <code>{{ info.fingerprint }}</code></p>{% endif %}
+{% endmacro %}
+{% macro problem_for(section) %}
+  {% if problem and problem.section == section %}<p class="error" role="alert">{{ problem.message }}</p>{% endif %}
+{% endmacro %}
+{% macro card_actions(section, info) %}
+  {% if info %}
+  <div class="row">
+    <form method="post" action="/settings/{{ section }}/test" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary">Test connection</button>
+    </form>
+    <form method="post" action="/settings/{{ section }}/remove" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input name="admin_password" type="password" placeholder="Admin password" autocomplete="current-password" aria-label="Admin password">
+      <button type="submit" class="danger">Remove</button>
+    </form>
+  </div>
+  {% endif %}
+{% endmacro %}
+{% block content %}
+<h1>Settings</h1>
+{% if welcome %}<p class="notice" role="status">Admin created. Add your store credentials and email below; each one is checked live before it's saved.</p>{% endif %}
+{% if saved %}<p class="notice" role="status">{{ saved }}</p>{% endif %}
+{% if checks_shown %}
+<section class="card">
+  <h2>Check results</h2>
+  <ul class="checks">{% for c in checks_shown %}<li class="{{ c.level }}"><strong>{{ c.level|upper }}</strong> {{ c.text }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="card" id="apple">
+  <h2>Apple App Store Connect</h2>
+  <p class="muted">A Team API key with the <strong>Sales</strong> role (README, "Apple API key").</p>
+  {{ problem_for("apple") }}
+  {{ saved_line(credentials.apple) }}
+  <form method="post" action="/settings/apple" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Issuer ID <input name="issuer_id" value="{{ cfg.apple.issuer_id if cfg.apple else '' }}" required></label>
+    <label>Key ID <input name="key_id" value="{{ cfg.apple.key_id if cfg.apple else '' }}" required></label>
+    <label>Vendor number <input name="vendor_number" value="{{ cfg.apple.vendor_number if cfg.apple else '' }}" required></label>
+    <label>.p8 key file {% if credentials.apple %}<span class="muted">(leave empty to keep the saved key)</span>{% endif %}
+      <input name="p8" type="file" accept=".p8" {% if not credentials.apple %}required{% endif %}></label>
+    {{ reauth(credentials.apple) }}
+    <button type="submit">Check and save</button>
+  </form>
+  {{ card_actions("apple", credentials.apple) }}
+</section>
+
+<section class="card" id="google">
+  <h2>Google Play</h2>
+  <p class="muted">A service account invited in Play Console with <em>View app information and download bulk reports</em>; Android revenue also needs the optional financial permission (README, "Google service account").</p>
+  {{ problem_for("google") }}
+  {{ saved_line(credentials.google) }}
+  {% if cfg.google %}<p class="muted">Service account: {{ cfg.google.service_account_email }}</p>{% endif %}
+  <form method="post" action="/settings/google" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Service account JSON key {% if credentials.google %}<span class="muted">(leave empty to keep the saved key)</span>{% endif %}
+      <input name="service_account" type="file" accept=".json,application/json" {% if not credentials.google %}required{% endif %}></label>
+    <label>Cloud Storage URI <input name="bucket_uri" value="{{ cfg.google.bucket_uri if cfg.google else '' }}" placeholder="gs://pubsite_prod_…/" required></label>
+    {{ reauth(credentials.google) }}
+    <button type="submit">Check and save</button>
+  </form>
+  {{ card_actions("google", credentials.google) }}
+</section>
+
+<section class="card" id="email">
+  <h2>Email</h2>
+  <p class="muted">The daily digest goes through your own SMTP server; a test email is sent before saving (README, "SMTP setup").</p>
+  {{ problem_for("email") }}
+  {{ saved_line(credentials.email) }}
+  <form method="post" action="/settings/email">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid">
+      <label>SMTP host <input name="host" value="{{ cfg.email.host if cfg.email else '' }}" required></label>
+      <label>Port <input name="port" inputmode="numeric" value="{{ cfg.email.port if cfg.email else 587 }}" required></label>
+      <label>Security <select name="security_mode">
+        {% for mode in ["starttls", "ssl"] %}<option value="{{ mode }}" {% if cfg.email and cfg.email.security == mode %}selected{% endif %}>{{ mode }}</option>{% endfor %}
+      </select></label>
+      <label>Username <input name="username" value="{{ cfg.email.username if cfg.email else '' }}" required autocomplete="off"></label>
+    </div>
+    <label>Password {% if credentials.email %}<span class="muted">(leave empty to keep the saved one)</span>{% endif %}
+      <input name="password" type="password" autocomplete="new-password" {% if not credentials.email %}required{% endif %}></label>
+    <label>From <input name="from_addr" type="email" value="{{ cfg.email.from_addr if cfg.email else '' }}"></label>
+    <label>To (comma-separated) <input name="to_addrs" value="{{ cfg.email.to_addrs|join(', ') if cfg.email else '' }}" required></label>
+    {{ reauth(credentials.email) }}
+    <button type="submit">Send a test email and save</button>
+  </form>
+  {{ card_actions("email", credentials.email) }}
+</section>
+
+<section class="card" id="preferences">
+  <h2>Preferences</h2>
+  {{ problem_for("preferences") }}
+  <form method="post" action="/settings/preferences">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid">
+      <label>Daily run time <input name="run_time" value="{{ cfg.schedule.run_time }}" pattern="[0-2][0-9]:[0-5][0-9]" required></label>
+      <label>Time zone <input name="timezone" value="{{ timezone }}" placeholder="Europe/Kyiv"></label>
+      <label>Days re-pulled each run <input name="days" type="number" min="1" max="30" value="{{ cfg.schedule.days }}"></label>
+      <label>Overdue after (days) <input name="stale_days" type="number" min="1" max="30" value="{{ cfg.digest.stale_days }}"></label>
+      <label>Crash-rate warning (%) <input name="crash_threshold" value="{{ '%.2f'|format(cfg.digest.crash_threshold * 100) }}"></label>
+      <label>ANR-rate warning (%) <input name="anr_threshold" value="{{ '%.2f'|format(cfg.digest.anr_threshold * 100) }}"></label>
+      <label>Display currency <input name="display_currency" value="{{ cfg.digest.display_currency }}" placeholder="USD" maxlength="3"></label>
+    </div>
+    <label>Fixed conversion rates <span class="muted">(optional; one per line, e.g. <code>CAD = 0.73</code>; no rates are fetched)</span>
+      <textarea name="rates" rows="3">{{ rates_text }}</textarea></label>
+    <label>Dashboard URL <span class="muted">(for the link in the email)</span>
+      <input name="base_url" value="{{ base_url }}" placeholder="https://stats.example.com"></label>
+    <button type="submit">Save preferences</button>
+  </form>
+</section>
+
+<section class="card" id="apps">
+  <h2>Apps</h2>
+  {{ problem_for("apps") }}
+  {% if apps %}
+  <form method="post" action="/settings/apps">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <table>
+      <thead><tr><th>Store name</th><th>Platform</th><th>Display name</th><th>Hidden</th><th>Paired with</th></tr></thead>
+      <tbody>
+      {% for app in apps %}
+        <tr>
+          <td>{{ app.name }} <span class="muted small">{{ app.store_id }}</span></td>
+          <td>{{ "iOS" if app.platform == "ios" else "Android" }}</td>
+          <td><input name="name_{{ app.id }}" value="{{ app.display_name or '' }}" placeholder="{{ app.name }}" aria-label="Display name for {{ app.name }}"></td>
+          <td><input type="checkbox" name="hidden_{{ app.id }}" {% if app.hidden %}checked{% endif %} aria-label="Hide {{ app.name }}"></td>
+          <td>{% if partner[app.id] %}{{ partner[app.id].label }} <span class="muted small">({{ app.pair_source }})</span>{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit">Save names and visibility</button>
+  </form>
+  <p class="muted">Hidden apps leave every list but still count in totals, and still get crash warnings.</p>
+  <div class="row">
+    <form method="post" action="/settings/apps/pair" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="ios_id" aria-label="iOS app">{% for a in ios_apps %}<option value="{{ a.id }}">{{ a.label }}</option>{% endfor %}</select>
+      <select name="android_id" aria-label="Android app">{% for a in android_apps %}<option value="{{ a.id }}">{{ a.label }} ({{ a.store_id }})</option>{% endfor %}</select>
+      <button type="submit" class="secondary">Pair</button>
+    </form>
+    <form method="post" action="/settings/apps/unpair" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="app_id" aria-label="App to unpair">{% for a in apps if a.pair_key %}<option value="{{ a.id }}">{{ a.label }}</option>{% endfor %}</select>
+      <button type="submit" class="secondary">Unpair</button>
+    </form>
+  </div>
+  <p class="muted">Same-named iOS and Android apps pair automatically when the match is unambiguous; a pairing or unpairing you make here is kept.</p>
+  {% else %}<p class="muted">Apps appear once a credential is saved.</p>{% endif %}
+</section>
+
+<section class="card" id="account">
+  <h2>Account</h2>
+  {{ problem_for("account") }}
+  <p>Signed in as {{ user.email }}. Two-factor authentication is <strong>{{ "on" if totp_enabled else "off" }}</strong>.</p>
+  {% if totp_setup %}
+    <div class="notice">
+      <p>Add this key to your authenticator app, then enter the code it shows. The key is shown only now.</p>
+      <p><code class="secret">{{ totp_setup.secret }}</code></p>
+      <p class="small wrap"><code>{{ totp_setup.uri }}</code></p>
+      <form method="post" action="/settings/account/totp/confirm" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" required autocomplete="one-time-code" aria-label="Code">
+        <button type="submit">Turn on</button>
+      </form>
+    </div>
+  {% elif totp_enabled %}
+    <form method="post" action="/settings/account/totp/disable" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input name="current" type="password" placeholder="Password" autocomplete="current-password" aria-label="Password" required>
+      <button type="submit" class="danger">Turn off two-factor</button>
+    </form>
+  {% else %}
+    <form method="post" action="/settings/account/totp/start" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input name="current" type="password" placeholder="Password" autocomplete="current-password" aria-label="Password" required>
+      <button type="submit" class="secondary">Set up two-factor</button>
+    </form>
+  {% endif %}
+  <h3>Change password</h3>
+  <form method="post" action="/settings/account/password">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Current password <input name="current" type="password" required autocomplete="current-password"></label>
+    <label>New password (12+ characters) <input name="new" type="password" minlength="12" required autocomplete="new-password"></label>
+    <label>Repeat new password <input name="confirm" type="password" minlength="12" required autocomplete="new-password"></label>
+    <button type="submit">Change password</button>
+  </form>
+</section>
+{% endblock %}

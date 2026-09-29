@@ -17,14 +17,16 @@ def test_schema_created_and_versioned(conn: sqlite3.Connection) -> None:
         r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {"apps", "daily_metrics", "snapshots", "ingest_log", "kv"} <= tables
-    assert db.get_kv(conn, "schema_version") == "2"
+    # 0003's hosted-mode tables exist everywhere, local databases included.
+    assert {"secrets", "users", "settings", "sessions"} <= tables
+    assert db.get_kv(conn, "schema_version") == "3"
 
 
 def test_migrations_idempotent_and_wal(tmp_path: Path) -> None:
     path = tmp_path / "sp.db"
     db.connect(path).close()
     conn = db.connect(path)
-    assert db.migrate(conn) == 2
+    assert db.migrate(conn) == 3
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     conn.close()
 

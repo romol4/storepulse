@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 # Fixed metric vocabulary (docs/SPEC.md, Storage). Unknown metrics are rejected.
 METRICS: frozenset[str] = frozenset(
@@ -313,4 +315,251 @@ def log_ingest(
         "INSERT INTO ingest_log (source, report_date, started_at, finished_at, status, rows, "
         "error, app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (source, report_date, started_at, utc_now(), status, rows, note, app_id),
+    )
+
+
+# -- hosted mode (docs/SPEC.md, Storage → Hosted-mode additions) ---------------------------
+
+
+@dataclass(frozen=True)
+class SecretRow:
+    name: str
+    ciphertext: bytes
+    nonce: bytes
+    fingerprint: str
+    updated_at: str
+
+
+def get_secret_row(conn: sqlite3.Connection, name: str) -> SecretRow | None:
+    row = conn.execute(
+        "SELECT name, ciphertext, nonce, fingerprint, updated_at FROM secrets WHERE name = ?",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    return SecretRow(
+        str(row["name"]),
+        bytes(row["ciphertext"]),
+        bytes(row["nonce"]),
+        str(row["fingerprint"]),
+        str(row["updated_at"]),
+    )
+
+
+def put_secret_row(
+    conn: sqlite3.Connection, name: str, ciphertext: bytes, nonce: bytes, fingerprint: str
+) -> None:
+    conn.execute(
+        "INSERT INTO secrets (name, ciphertext, nonce, fingerprint, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET "
+        "ciphertext = excluded.ciphertext, nonce = excluded.nonce, "
+        "fingerprint = excluded.fingerprint, updated_at = excluded.updated_at",
+        (name, ciphertext, nonce, fingerprint, utc_now()),
+    )
+
+
+def delete_secret_row(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
+
+
+def secret_names(conn: sqlite3.Connection) -> list[str]:
+    return [str(r["name"]) for r in conn.execute("SELECT name FROM secrets ORDER BY name")]
+
+
+def get_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Every settings row, JSON-decoded."""
+    return {
+        str(r["key"]): json.loads(r["value"])
+        for r in conn.execute("SELECT key, value FROM settings")
+    }
+
+
+def set_settings(
+    conn: sqlite3.Connection, values: dict[str, Any], *, remove: Collection[str] = ()
+) -> None:
+    """Upsert ``values`` (JSON-encoded) and delete ``remove``, in one transaction."""
+    now = utc_now()
+    with transaction(conn):
+        for key, value in values.items():
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, json.dumps(value, sort_keys=True), now),
+            )
+        for key in remove:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
+@dataclass(frozen=True)
+class User:
+    id: int
+    email: str
+    password_hash: str
+    totp_secret_enc: bytes | None
+
+
+def _user(row: sqlite3.Row | None) -> User | None:
+    if row is None:
+        return None
+    totp = row["totp_secret_enc"]
+    return User(
+        int(row["id"]),
+        str(row["email"]),
+        str(row["password_hash"]),
+        bytes(totp) if totp is not None else None,
+    )
+
+
+def user_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
+
+
+def create_user(
+    conn: sqlite3.Connection, email: str, password_hash: str, totp_secret_enc: bytes | None
+) -> int:
+    row = conn.execute(
+        "INSERT INTO users (email, password_hash, totp_secret_enc) VALUES (?, ?, ?) RETURNING id",
+        (email, password_hash, totp_secret_enc),
+    ).fetchone()
+    return int(row["id"])
+
+
+def get_user_by_email(conn: sqlite3.Connection, email: str) -> User | None:
+    return _user(conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone())
+
+
+def get_user(conn: sqlite3.Connection, user_id: int) -> User | None:
+    return _user(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+
+
+def set_user_password_hash(conn: sqlite3.Connection, user_id: int, password_hash: str) -> None:
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+
+
+def claim_totp_step(conn: sqlite3.Connection, user_id: int, step: int) -> bool:
+    """Record ``step`` as the user's last accepted TOTP time step, only if it is later than
+    the one already recorded. False means that code (or an earlier one) was already used.
+    One statement, so two requests racing with the same code can't both succeed."""
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at "
+            "WHERE CAST(settings.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+            (f"hosted.totp_last_step.{user_id}", json.dumps(step), utc_now()),
+        )
+    return cur.rowcount == 1
+
+
+def set_user_totp(conn: sqlite3.Connection, user_id: int, totp_secret_enc: bytes | None) -> None:
+    conn.execute("UPDATE users SET totp_secret_enc = ? WHERE id = ?", (totp_secret_enc, user_id))
+
+
+@dataclass(frozen=True)
+class Session:
+    token_hash: str
+    user_id: int
+    csrf_token: str
+    totp_pending: bool
+    expires_at: str
+
+
+def create_session(
+    conn: sqlite3.Connection,
+    token_hash: str,
+    user_id: int,
+    csrf_token: str,
+    expires_at: str,
+    *,
+    totp_pending: bool,
+) -> None:
+    conn.execute(
+        "INSERT INTO sessions (token_hash, user_id, csrf_token, totp_pending, created_at, "
+        "expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (token_hash, user_id, csrf_token, int(totp_pending), utc_now(), expires_at),
+    )
+
+
+def get_session(conn: sqlite3.Connection, token_hash: str, now: str) -> Session | None:
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?", (token_hash, now)
+    ).fetchone()
+    if row is None:
+        return None
+    return Session(
+        str(row["token_hash"]),
+        int(row["user_id"]),
+        str(row["csrf_token"]),
+        bool(row["totp_pending"]),
+        str(row["expires_at"]),
+    )
+
+
+def delete_session(conn: sqlite3.Connection, token_hash: str) -> None:
+    conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+
+def delete_user_sessions(conn: sqlite3.Connection, user_id: int) -> None:
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+
+def delete_expired_sessions(conn: sqlite3.Connection, now: str) -> None:
+    conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+
+
+@dataclass(frozen=True)
+class AppInfo:
+    id: int
+    platform: str
+    store_id: str
+    name: str  # as the store reports it
+    display_name: str | None
+    pair_key: str | None
+    pair_source: str | None
+    hidden: bool
+
+    @property
+    def label(self) -> str:
+        return self.display_name or self.name
+
+
+def list_apps(conn: sqlite3.Connection) -> list[AppInfo]:
+    rows = conn.execute(
+        "SELECT id, platform, store_id, name, display_name, pair_key, pair_source, hidden "
+        "FROM apps ORDER BY name, platform"
+    )
+    return [
+        AppInfo(
+            int(r["id"]),
+            str(r["platform"]),
+            str(r["store_id"]),
+            str(r["name"]),
+            r["display_name"],
+            r["pair_key"],
+            r["pair_source"],
+            bool(r["hidden"]),
+        )
+        for r in rows
+    ]
+
+
+def set_app_pair(
+    conn: sqlite3.Connection, app_id: int, pair_key: str | None, pair_source: str
+) -> None:
+    if pair_source not in ("auto", "user"):
+        raise ValueError(f"unknown pair_source {pair_source!r}")
+    conn.execute(
+        "UPDATE apps SET pair_key = ?, pair_source = ? WHERE id = ?",
+        (pair_key, pair_source, app_id),
+    )
+
+
+def set_app_display(
+    conn: sqlite3.Connection, app_id: int, *, display_name: str | None, hidden: bool
+) -> None:
+    """Rename or hide an app. Never touches pairing (docs/SPEC.md, Storage)."""
+    conn.execute(
+        "UPDATE apps SET display_name = ?, hidden = ? WHERE id = ?",
+        (display_name or None, int(hidden), app_id),
     )

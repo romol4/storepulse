@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Log in · Storepulse{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Log in</h1>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Email <input name="email" type="email" value="{{ email or '' }}" required autocomplete="username"></label>
+    <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+    <button type="submit">Log in</button>
+  </form>
+</section>
+{% endblock %}
