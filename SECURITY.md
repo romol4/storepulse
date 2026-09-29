@@ -54,3 +54,60 @@ receives fixes.
     cancellation survey responses*, which also exposes order details and buyers'
     city, state and postcode. Storepulse keeps only the buyer's country, and works
     without that permission (no Android revenue).
+
+## Security review checklist
+
+Tracks `docs/SPEC.md`'s Phase 5a (local mode and supply chain) and 5b (hosted
+surface, once Phase 4 lands) "Done when" criteria. 5b's items stay unchecked
+until that phase's own PR does the corresponding work.
+
+### Secrets and data at rest
+- [x] Local-mode keychain/encrypted-file paths, as documented above.
+- [ ] Hosted-mode `DbEncryptedStore`: secrets unreadable in the DB without the master
+      key. (5b)
+- [x] The SQLite file and its directory are 0600/0700, not just relying on encryption
+      for the columns that have it — the file also holds unencrypted sales data and,
+      in hosted mode, session token hashes.
+- [x] `.gitignore` covers every secret file type this document and `CLAUDE.md` name.
+
+### Secrets never appear in...
+- [x] `config.toml`, the SQLite database's plaintext columns, raw report caches, or
+      logs.
+- [x] Log output or error messages, across every CLI command and both mail-send
+      paths — swept broadly, not just unit-tested in isolation.
+- [ ] Hosted-mode error pages (404/405/500) and JSON responses. (5b)
+
+### Supply chain
+- [x] Runtime dependencies pinned to compatible ranges, audited clean by `pip-audit`.
+- [x] Dependabot configured for pip and for GitHub Actions.
+- [x] Every GitHub Actions `uses:` pinned to a commit SHA, not a mutable tag —
+      especially `release.yml`, which holds PyPI trusted publishing permissions.
+- [x] A secret-scanning step runs in CI.
+- [ ] The base Docker image is pinned by digest; the built image is scanned for
+      known vulnerabilities in CI. (5b)
+
+### Least privilege / no unexpected calls
+- [x] Setup guides request only the documented read-only roles; Android revenue is
+      opt-in.
+- [x] Only Apple, Google, RevenueCat (opt-in), and the user's own SMTP server are
+      contacted — no telemetry.
+
+### Hosted auth surface (5b)
+- [ ] Login, TOTP, and the setup token are all rate-limited; documented as
+      in-memory and reset on restart, or persisted.
+- [ ] A TOTP code cannot be replayed within its validity window.
+- [ ] CSRF is rejected on every state-changing route; a GET never requires a token.
+- [ ] A new session token is issued on login (no session fixation from a pre-auth
+      cookie).
+- [ ] Session expiry is enforced server-side end-to-end, not only via cookie
+      `Max-Age`.
+- [ ] `X-Forwarded-For` is not trusted for rate-limiting/throttle keys unless a
+      trusted-proxies setting is explicitly configured.
+- [ ] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
+      any app-controlled label (test: an app literally named `</script><script>...`).
+- [ ] The SMTP-test-connection feature's ability to reach internal hosts from an
+      admin session is a documented, deliberate decision, not an oversight.
+
+### Second review (5b)
+- [ ] A full Claude review pass over the hosted surface finds no open high-severity
+      issue.
