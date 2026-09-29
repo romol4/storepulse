@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -12,7 +13,9 @@ import pytest
 from keyring.backends import fail
 
 from conftest import MemoryKeyring
+from storepulse.cli.schedule import PASSPHRASE_FILENAME
 from storepulse.core import secrets
+from storepulse.core.config import CONFIG_FILENAME, DB_FILENAME
 from storepulse.core.secrets import (
     EncryptedFileStore,
     KeyringStore,
@@ -21,6 +24,8 @@ from storepulse.core.secrets import (
     open_store,
     redact,
 )
+
+REPO_ROOT = Path(__file__).parent.parent
 
 PEM = (
     "-----BEGIN PRIVATE KEY-----\n"
@@ -299,3 +304,33 @@ def test_wrapped_file_mode_0600(memory_keyring: MemoryKeyring, tmp_path: Path) -
     assert stat.S_IMODE((tmp_path / secrets.WRAPPED_FILENAME).stat().st_mode) == 0o600
     # Written atomically: no temp files left behind.
     assert [p.name for p in tmp_path.iterdir()] == [secrets.WRAPPED_FILENAME]
+
+
+# Every secret-bearing filename Storepulse itself can produce, plus the user-supplied
+# credential files CLAUDE.md and SECURITY.md name. A new secret-bearing file must be added
+# here (and to .gitignore) in the same PR that introduces it.
+SECRET_BEARING_FILENAMES = [
+    secrets.SECRETS_FILENAME,
+    secrets.WRAPPED_FILENAME,
+    CONFIG_FILENAME,
+    DB_FILENAME,
+    f"{DB_FILENAME}-wal",
+    PASSPHRASE_FILENAME,
+    "AuthKey_2X9R4HXF34.p8",
+    "my-project-service-account.json",
+    "google-sa.json",
+    ".env",
+]
+
+
+def _gitignore_patterns() -> list[str]:
+    lines = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+
+
+@pytest.mark.parametrize("filename", SECRET_BEARING_FILENAMES)
+def test_gitignore_covers_every_secret_bearing_filename(filename: str) -> None:
+    patterns = _gitignore_patterns()
+    assert any(fnmatch.fnmatch(filename, pattern) for pattern in patterns), (
+        f"{filename!r} is not covered by any .gitignore pattern"
+    )

@@ -81,9 +81,72 @@ receives fixes.
 - **Sessions and forms.** Sessions are server-side; the cookie holds a random token
   whose hash is stored, and it is `HttpOnly`, `SameSite=Strict`, and `Secure` behind
   HTTPS. Every form carries a CSRF token. Password, TOTP and setup-token attempts are
-  throttled to 5 failures per 15 minutes per IP and per account. Pages are served
-  with a strict Content-Security-Policy and load no third-party scripts, fonts or
-  CDNs (Chart.js is bundled).
+  throttled to 5 failures per 15 minutes per IP and per account, in memory — a
+  restart clears it. Pages are served with a strict Content-Security-Policy and
+  load no third-party scripts, fonts or CDNs (Chart.js is bundled).
 - **Network exposure.** The compose file binds port 8000 to `127.0.0.1` only. Put
   a TLS reverse proxy in front before exposing it (see the README), and set
   `STOREPULSE_TRUSTED_PROXIES` so throttling sees real client addresses.
+
+## Security review checklist
+
+Tracks `docs/SPEC.md`'s Phase 5a (local mode and supply chain) and 5b (hosted
+surface) "Done when" criteria. Most of 5b is already checked: PR #8 built the
+hosted surface this checklist originally scoped 5b to audit, its own tests cover
+several of these properties directly, and a same-day follow-up fixed a TOTP-replay
+issue this checklist called for. What's left below hasn't been verified by any PR
+or review yet.
+
+### Secrets and data at rest
+- [x] Local-mode keychain/encrypted-file paths, as documented above.
+- [x] Hosted-mode `DbEncryptedStore`: secrets unreadable in the DB without the master
+      key (`test_database_alone_reveals_no_secret`, `test_wrong_master_key_fails_clearly`).
+- [x] The SQLite file and its directory are 0600/0700, not just relying on encryption
+      for the columns that have it — the file also holds unencrypted sales data and,
+      in hosted mode, session token hashes.
+- [x] `.gitignore` covers every secret file type this document and `CLAUDE.md` name.
+
+### Secrets never appear in...
+- [x] `config.toml`, the SQLite database's plaintext columns, raw report caches, or
+      logs.
+- [x] Log output or error messages, across every CLI command and both mail-send
+      paths — swept broadly, not just unit-tested in isolation.
+- [ ] Hosted-mode error pages (404/405/500) and JSON responses. (5b)
+
+### Supply chain
+- [x] Runtime dependencies pinned to compatible ranges, audited clean by `pip-audit`.
+- [x] Dependabot configured for pip and for GitHub Actions.
+- [x] Every GitHub Actions `uses:` pinned to a commit SHA, not a mutable tag —
+      especially `release.yml`, which holds PyPI trusted publishing and GHCR
+      permissions.
+- [x] A secret-scanning step runs in CI.
+- [ ] The base Docker image is pinned by digest; the built image is scanned for
+      known vulnerabilities in CI. (5b)
+
+### Least privilege / no unexpected calls
+- [x] Setup guides request only the documented read-only roles; Android revenue is
+      opt-in.
+- [x] Only Apple, Google, RevenueCat (opt-in), and the user's own SMTP server are
+      contacted — no telemetry.
+
+### Hosted auth surface
+- [x] Login, TOTP, and the setup token are all rate-limited; documented above as
+      in-memory and reset on restart.
+- [x] A TOTP code cannot be replayed within its validity window (`claim_totp_step`).
+- [x] CSRF is rejected on every state-changing route; a GET never requires a token.
+- [x] A new session token is issued on login (no session fixation from a pre-auth
+      cookie): `start_session` always mints a fresh token, kept separate from the
+      anonymous CSRF cookie used before login.
+- [x] Session expiry is enforced server-side end-to-end (`get_session`'s
+      `expires_at > now` check), not only via cookie `Max-Age`.
+- [x] `X-Forwarded-For` is not trusted for rate-limiting/throttle keys unless
+      `STOREPULSE_TRUSTED_PROXIES` is explicitly configured (uvicorn's
+      `forwarded_allow_ips`, default `127.0.0.1`).
+- [ ] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
+      any app-controlled label (test: an app literally named `</script><script>...`). (5b)
+- [ ] The SMTP-test-connection feature's ability to reach internal hosts from an
+      admin session is a documented, deliberate decision, not an oversight. (5b)
+
+### Second review
+- [ ] A full Claude review pass over the hosted surface finds no open high-severity
+      issue — blocked on the items still open above. (5b)

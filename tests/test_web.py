@@ -323,8 +323,12 @@ def test_totp_enrolment_and_login(site: Site) -> None:
         "/settings/account/totp/confirm", data={"csrf": csrf, "code": "000000"}
     )
     assert wrong.status_code == 400
+    # Captured once and reused below: two separate pyotp.TOTP(secret).now() calls can
+    # straddle a 30-second step boundary on a slow runner, which would make the "replay"
+    # check below race against real time instead of testing what it's meant to.
+    confirm_code = pyotp.TOTP(secret).now()
     ok = site.client.post(
-        "/settings/account/totp/confirm", data={"csrf": csrf, "code": pyotp.TOTP(secret).now()}
+        "/settings/account/totp/confirm", data={"csrf": csrf, "code": confirm_code}
     )
     assert ok.status_code == 303
     conn = db.connect(config.db_path())
@@ -340,7 +344,7 @@ def test_totp_enrolment_and_login(site: Site) -> None:
     assert bad.status_code == 401
     # The code that confirmed enrolment is spent; the next step's code (within the drift
     # window) signs in.
-    spent = site.client.post("/login/totp", data={"csrf": csrf, "code": pyotp.TOTP(secret).now()})
+    spent = site.client.post("/login/totp", data={"csrf": csrf, "code": confirm_code})
     assert spent.status_code == 401
     good = site.client.post("/login/totp", data={"csrf": csrf, "code": _next_code(secret)})
     assert good.headers["location"] == "/"
