@@ -30,6 +30,7 @@ from storepulse.cli.common import (
 from storepulse.core import config, db, discovery, mailer
 from storepulse.core.config import EMAIL_SECURITY_MODES
 from storepulse.core.secrets import SecretStore
+from storepulse.core.sources import apple_sales
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import (
     BULK_PERMISSION,
@@ -319,7 +320,12 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
             if apple is not None:
                 days = ask_positive_int(env, "Apple: how many days back", DEFAULT_APPLE_DAYS)
                 status |= collect.backfill_apple(
-                    env, conn, cfg, yesterday - timedelta(days=days - 1), yesterday
+                    env,
+                    conn,
+                    cfg,
+                    apple_sales.SOURCE,
+                    yesterday - timedelta(days=days - 1),
+                    yesterday,
                 )
             if google is not None:
                 months = ask_positive_int(
