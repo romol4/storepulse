@@ -242,9 +242,17 @@ CREATE TABLE users (
   password_hash TEXT NOT NULL,    -- argon2id
   totp_secret_enc BLOB            -- optional, encrypted like secrets
 );
+
+CREATE TABLE settings (
+  key         TEXT PRIMARY KEY,   -- 'apple.vendor_number', 'schedule.run_time', 'digest.rates', …
+  value       TEXT NOT NULL,      -- JSON-encoded
+  updated_at  TEXT NOT NULL
+);
 ```
 
-The `apps` table gains `display_name`, `pair_key` (links an iOS and Android app into one logical app), and `hidden`.
+Everything non-secret that local mode keeps in `config.toml` — every field of `core/config.py`'s `Config` dataclass — lives here instead, one row per dotted key, JSON-encoded so a new setting never needs a migration (the same reasoning as `daily_metrics`). This includes `apple.issuer_id`/`vendor_number` and `google.bucket_uri`/`service_account_email`: they aren't secret, so they follow `Config`'s split rather than sitting in `secrets` next to the `.p8` or service-account JSON they describe. `settings` stays a separate table from `kv`, even though the shapes match, because `kv` is internal bookkeeping (analytics request IDs, the SKU map, schema version) that no user ever edits, while `settings` is user-facing configuration the web UI reads and writes.
+
+The `apps` table gains `display_name`, `pair_key` (links an iOS and Android app into one logical app), and `hidden`. These columns arrive through the same migration sequence `core/db.py` applies to every database, so a local-mode install picks them up too on its next upgrade; local mode's CLI just never writes `pair_key`, which is why its digest (Outputs) still treats an iOS and Android build of the same app as two separate rows.
 
 ## Scheduling and reliability
 
@@ -368,8 +376,10 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
 - *Done when:* fixture-driven parser and mapping tests hit exact, hand-verified totals for both reports, and re-runs don't change row counts. Comparing `active_subscriptions`/`active_trials` against App Store Connect's Subscriptions dashboard is deferred to whenever a subscription-bearing app is available to dogfood against — LogicFT's FT apps have no confirmed subscription products today.
 
 4. **Hosted shell → release v0.2 (hosted)**
+   - Migration for Storage's hosted-mode additions: the `secrets`, `users` and `settings` tables, and the `apps` table's `display_name`/`pair_key`/`hidden` columns.
    - FastAPI app, admin account + TOTP, setup token, `DbEncryptedStore`, web setup flow, dashboard pages, in-process scheduler, Dockerfile, compose file, Caddy example.
-   - *Done when:* `docker compose up` to working dashboard and email in under 15 minutes; secrets are unreadable in the DB without the master key; image published to GHCR.
+   - App pairing, pulled forward from Storage/Data sources/Web dashboard, which already describe it as a hosted-mode feature: `core/discovery.py` auto-pairs same-named iOS and Android apps on discovery; the Settings page's pairing controls (rename, re-pair, hide) write `pair_key`/`display_name`/`hidden` directly. A paired app becomes one App page and one digest per-app line instead of two: its "sum"-column metrics (Storage's metric vocabulary — `installs`, `proceeds`, …) add across the pair's two `app_id`s for that combined line, while its snapshot and ratio metrics (`active_devices`, `vitals_users`, `crash_rate_28d`, `anr_rate_28d`, `active_subscriptions`, `active_trials`) are never summed across platforms — the App page already shows those broken out per platform ("iOS and Android side by side"), and the digest keeps evaluating vitals warnings per platform underneath the merged line. This is `core/digest.py` and `core/discovery.py` work, not just `web/`; local mode's `apps` rows never get a `pair_key` written, so its behavior is unchanged.
+   - *Done when:* `docker compose up` to working dashboard and email in under 15 minutes; a same-named iOS and Android app auto-pair into one App page and one digest line, with vitals still broken out per platform; secrets are unreadable in the DB without the master key; image published to GHCR.
 5. **Security review**
    - Dependency audit, secret-redaction tests (grep logs and error pages for key material), CSRF and session tests, rate-limited login.
    - *Done when:* checklist in `SECURITY.md` passes and a second reviewer (Claude review pass) finds no open high-severity issues.
