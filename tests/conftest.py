@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from keyring.backend import KeyringBackend
 
-from storepulse.core import db
+from storepulse.core import db, mailer
 
 FIXTURES = Path(__file__).parent / "fixtures"
 APPLE_FIXTURES = FIXTURES / "apple_sales"
@@ -95,6 +95,19 @@ def isolated_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("STOREPULSE_MODE", "STOREPULSE_MASTER_KEY", "STOREPULSE_MASTER_KEY_FILE"):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def no_real_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mailer._connect() resolves the SMTP host before connecting (an SSRF guard); default
+    that to loopback so no test ever makes a real DNS lookup. A test can monkeypatch
+    socket.getaddrinfo again itself, after this fixture runs, to exercise a specific
+    resolved address."""
+    monkeypatch.setattr(
+        mailer.socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(mailer.socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))],
+    )
 
 
 def apple_error(status: int, detail: str, code: str = "") -> httpx.Response:

@@ -28,11 +28,12 @@ from conftest import (
     router,
     standard_objects,
 )
-from storepulse.core import config, db
+from storepulse.core import config, dashboard, db
 from storepulse.core.secrets import SecretStoreError
 from storepulse.web import security
 from storepulse.web.app import create_app
 from storepulse.web.jobs import JobDeps
+from storepulse.web.pages_dashboard import _chart_json
 
 MASTER_KEY = "test-master-key-" + "x" * 32
 ADMIN = "admin@example.com"
@@ -142,6 +143,13 @@ def test_health_and_security_headers(site: Site) -> None:
     assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_debug_mode_is_never_enabled(site: Site) -> None:
+    # Starlette's debug mode embeds full tracebacks - including local variables, which
+    # can hold a decrypted secret - into 500 responses. Cheap, permanent insurance that
+    # nothing ever flips this on.
+    assert site.client.app.debug is False  # type: ignore[attr-defined]
 
 
 def test_everything_redirects_to_setup_until_an_admin_exists(site: Site) -> None:
@@ -279,6 +287,37 @@ def test_session_cookie_flags(site: Site) -> None:
     response = site.client.post("/login", data={"csrf": csrf, "email": ADMIN, "password": PASSWORD})
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+
+
+def test_login_rotates_the_session_token(site: Site) -> None:
+    # Session fixation: an attacker who plants their own session id in the victim's
+    # cookie jar before login must not have that id become valid once they log in.
+    # This can't go through the shared _login() helper: it clears cookies as its very
+    # first step, which would wipe the planted cookie before the login POST happens.
+    _setup_admin(site)
+    site.client.cookies.clear()
+    site.client.cookies.set(security.SESSION_COOKIE, "attacker-chosen-session-id")
+    csrf = site.csrf("/login")
+    response = site.client.post("/login", data={"csrf": csrf, "email": ADMIN, "password": PASSWORD})
+    assert response.status_code == 303, response.text
+    new_cookie = response.headers["set-cookie"]
+    assert "attacker-chosen-session-id" not in new_cookie
+
+
+def test_expired_session_is_rejected_server_side(site: Site) -> None:
+    # get_session's SQL enforces expires_at > now itself; TestClient never independently
+    # expires cookies by Max-Age, so only a raw-SQL edit actually proves this is checked
+    # server-side, not only by the cookie's own lifetime.
+    _setup_admin(site)
+    _login(site)
+    token = site.client.cookies[security.SESSION_COOKIE]
+    conn = db.connect(config.db_path())
+    conn.execute(
+        "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+        ("2000-01-01T00:00:00", security.token_hash(token)),
+    )
+    conn.close()
+    assert site.client.get("/").headers["location"] == "/login"
 
 
 def test_login_is_throttled(site: Site) -> None:
@@ -500,6 +539,17 @@ def test_email_sends_a_test_before_saving(site: Site) -> None:
     assert site.smtp.sent == 1
 
 
+def test_email_rejects_a_link_local_host(site: Site) -> None:
+    # Closes the cloud-metadata-endpoint SSRF vector for the SMTP settings form; an
+    # IP-literal host is checked with no DNS lookup, so this doesn't depend on the
+    # no_real_dns fixture's default resolution.
+    _setup_admin(site)
+    response = _save_email(site, host="169.254.169.254")
+    assert response.status_code == 400  # type: ignore[attr-defined]
+    assert "link-local" in response.text  # type: ignore[attr-defined]
+    assert config.load_hosted(db.connect(config.db_path())).email is None
+
+
 def test_remove_needs_the_admin_password(site: Site) -> None:
     _setup_admin(site)
     _save_email(site)
@@ -539,9 +589,15 @@ def test_no_page_or_response_contains_a_stored_secret(
         site.client.post(f"/settings/{s}/test", data={"csrf": csrf})
         for s in ("apple", "google", "email")
     ]
-    responses = [site.client.get(p) for p in paths] + posts
-    for response in responses:
-        assert response.status_code == 200, (response.url, response.status_code)
+    # Not just the normal-page crawl: a 404 and a 405 go through different handlers
+    # (FastAPI's own error paths, not our page functions) and need the same sweep.
+    checked = (
+        [(r, 200) for r in [site.client.get(p) for p in paths] + posts]
+        + [(site.client.get("/apps/999999"), 404)]
+        + [(site.client.get("/logout"), 405)]
+    )
+    for response, expected_status in checked:
+        assert response.status_code == expected_status, (response.url, response.status_code)
         body = response.text
         for secret in secrets:
             assert secret not in body, f"{response.url} leaks a secret"
@@ -608,6 +664,18 @@ def test_a_pair_first_valid_this_run_is_still_in_this_run_s_email(
     # Pairing must run before this run's own digest is built, not only before the next
     # page view, or a pair that first becomes valid this run ships as two rows by email.
     assert "billFT (iOS + Android)" in body.get_content()
+
+
+def test_chart_json_escapes_a_literal_script_close() -> None:
+    # _chart_json's output is embedded via |safe (overview.html, app.html) because it's
+    # trusted to never contain "<". Today it only ever serializes computed dates and
+    # floats, so no real caller can reach this — but nothing stops a future field from
+    # doing so. Force a malicious string into a field directly, independent of any
+    # rendering path, to pin the escaping down as a property of _chart_json itself.
+    series = dashboard.InstallsSeries(
+        days=["</script><script>alert(1)</script>"], ios=[1.0], android=[0.0]
+    )
+    assert "</script>" not in _chart_json(series)
 
 
 def test_app_page_shows_platforms_side_by_side(site: Site, p8_pem: str, sa_json: str) -> None:
