@@ -93,7 +93,7 @@ Local mode keeps its data in the platform's user data dir (via `platformdirs`); 
 
 Four sources, each behind its own module in `core/sources/`. Each is optional: a user with only Android apps sets up only Google. Endpoint names and CSV columns below reflect the APIs as of mid-2026; verify them against current Apple and Google docs before coding each module.
 
-**App discovery.** After credentials are saved, `discovery.py` lists apps automatically: `GET /v1/apps` on App Store Connect, and the Reporting API's app search on Play. It auto-pairs an iOS and an Android app into one logical app when their names match exactly once normalized (case, surrounding whitespace) and the match is 1:1 — exactly one app per platform has that name. Two apps on one platform sharing a name (LogicFT's own account has two Android apps both called "Bus Wise") are never auto-paired by guesswork; that's left for a user to resolve by hand in settings, like any other rename, re-pair, or hide. Because Play discovery re-runs on every collection, auto-pairing must be idempotent against a user's own choices — see Storage's `pair_source`. `display_name` and `hidden` are written only through settings; discovery never touches them.
+**App discovery.** After credentials are saved, `discovery.py` lists apps automatically: `GET /v1/apps` on App Store Connect, and the Reporting API's app search on Play. It auto-pairs an iOS and an Android app into one logical app when their store-reported names (`apps.name`, never a user's `display_name`) match exactly once normalized (case, whitespace) and the match is 1:1 — exactly one app per platform has that name. Two apps on one platform sharing a name (LogicFT's own account has two Android apps both called "Bus Wise") are never auto-paired by guesswork; that's left for a user to resolve by hand in settings, like any other rename, re-pair, or hide. Because Play discovery re-runs on every collection, auto-pairing must be idempotent against a user's own choices — see Storage's `pair_source`. Auto pairs are re-evaluated on every run: one that no longer matches 1:1 (a store rename, or a second same-named app appearing) drops back to unpaired and undecided. `display_name` and `hidden` are written only through settings; discovery never touches them.
 
 | Source | Gives us | Auth | Freshness |
 | --- | --- | --- | --- |
@@ -233,7 +233,7 @@ CREATE TABLE secrets (
   name        TEXT PRIMARY KEY,   -- 'apple_p8', 'google_sa', 'smtp_password', …
   ciphertext  BLOB NOT NULL,      -- AES-GCM, key derived from STOREPULSE_MASTER_KEY
   nonce       BLOB NOT NULL,
-  fingerprint TEXT NOT NULL,      -- shown in UI instead of the secret
+  fingerprint TEXT NOT NULL,      -- shown in UI instead of the secret; a keyed HMAC, so the DB alone can't test guesses
   updated_at  TEXT NOT NULL
 );
 
@@ -248,7 +248,18 @@ CREATE TABLE settings (
   value       TEXT NOT NULL,      -- JSON-encoded
   updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE sessions (           -- server-side login sessions
+  token_hash   TEXT PRIMARY KEY,  -- sha256 of the cookie token; the token itself is never stored
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  csrf_token   TEXT NOT NULL,     -- required on every POST form
+  totp_pending INTEGER NOT NULL DEFAULT 0,  -- password accepted, second factor not yet
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL
+);
 ```
+
+Hosted-only settings live under the `hosted.` prefix, outside `Config`: `hosted.timezone` (the scheduler's time zone), `hosted.base_url` (the dashboard link in emails), the one-time setup token's hash while no admin exists, and a sealed TOTP secret during enrolment.
 
 Everything non-secret that local mode keeps in `config.toml` lives here instead: every field of `core/config.py`'s `Config` dataclass except `secret_store` (hosted mode only ever uses `DbEncryptedStore`) and `extra` (local mode's forward-compatibility passthrough for unrecognized TOML sections — meaningless without a TOML file). One row per dotted key, JSON-encoded, so a new setting never needs a migration (the same reasoning as `daily_metrics`). This includes `apple.issuer_id`/`vendor_number` and `google.bucket_uri`/`service_account_email`: they aren't secret, so they follow `Config`'s split rather than sitting in `secrets` next to the `.p8` or service-account JSON they describe. `settings` stays a separate table from `kv`, even though the shapes match, because `kv` is internal bookkeeping (analytics request IDs, the SKU map, schema version) that no user ever edits, while `settings` is user-facing configuration the web UI reads and writes.
 
@@ -256,7 +267,7 @@ The `apps` table gains `display_name`, `pair_key` (links an iOS and Android app 
 
 Hiding an app (`hidden = 1`) removes it from every list: the digest's per-app rows and its "+N more apps" count, the dashboard's app lists and App pages, and the "top app" pick. It still counts in combined totals and trends, so the headline numbers keep matching the stores' own dashboards, and its vitals warnings still appear, since a crashing app shouldn't go quiet because it's hidden. Hiding changes neither `pair_key` nor `pair_source`.
 
-These columns, and `secrets`/`users`/`settings` above, arrive through the same migration sequence `core/db.py` applies to every database: a local-mode install picks them all up too, just unused — its CLI never writes `pair_key` (so its digest, Outputs, never merges an iOS and Android build of the same app), and its settings still round-trip through `config.toml`, not this table.
+These columns, and `secrets`/`users`/`settings`/`sessions` above, arrive through the same migration sequence `core/db.py` applies to every database: a local-mode install picks them all up too, just unused — its CLI never writes `pair_key` (so its digest, Outputs, never merges an iOS and Android build of the same app), and its settings still round-trip through `config.toml`, not this table.
 
 ## Scheduling and reliability
 
@@ -265,7 +276,7 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 - **Local:** `storepulse schedule install` writes a systemd user timer (Linux, `Persistent=true`, falling back to a crontab line when systemd isn't available), a launchd agent (macOS), or a Task Scheduler task (Windows); `schedule remove` undoes it. If the machine was asleep at run time, the next run catches up because of the 7-day window.
   - A systemd user timer only fires while its session is active unless the user lingers. `schedule install` checks `loginctl show-user … -p Linger` and offers to run `loginctl enable-linger`, since a machine reached only over SSH would otherwise silently stop running the job; `schedule show` reports the current state.
   - A scheduled run can't prompt for a passphrase, so with the encrypted-file secret store `schedule install` offers to save it into a `0600` file in the config directory and points the job at it with `STOREPULSE_PASSPHRASE_FILE` (read only by `core/secrets.py`); declining leaves the schedule uninstalled. Not yet supported on Windows with the file store — Windows Credential Manager is the expected store there.
-- **Hosted:** an in-process scheduler (APScheduler) in the container; the run time is set in settings. A Run now button triggers an immediate run.
+- **Hosted:** an in-process scheduler (APScheduler) in the container; the run time and time zone are set in Settings. A Run now button triggers an immediate run, and Load history a backfill; both share one worker with the scheduler and `run_all`'s lock.
 
 **CLI** (both modes; in Docker via `docker compose exec`)
 
@@ -275,6 +286,7 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 - `storepulse digest --dry-run` — print or open the digest instead of sending it.
 - `storepulse status` — last result per source and date, highlighting gaps.
 - `storepulse doctor` — tests every credential and SMTP without pulling data.
+- `storepulse serve` — runs the hosted web app (needs the `[web]` extra and the master key; the Docker image's command). Inside the container (`STOREPULSE_MODE=hosted`), every command reads settings and secrets from the database; `init` and `schedule` refuse there, since the web app and the built-in scheduler own setup and scheduling.
 
 **Error handling**
 
@@ -349,14 +361,14 @@ Setup is a guided flow that validates each credential live before saving it, so 
 | Item | Local mode | Hosted mode |
 | --- | --- | --- |
 | `.p8`, service account JSON, API keys, SMTP password | OS keychain (or encrypted file) | `secrets` table, AES-GCM |
-| Master key | n/a (keychain) or passphrase | `STOREPULSE_MASTER_KEY` env var or Docker secret |
+| Master key | n/a (keychain) or passphrase | `STOREPULSE_MASTER_KEY` env var, or a Docker secret file named by `STOREPULSE_MASTER_KEY_FILE`; at least 32 characters |
 | Non-secret settings | `config.toml` in the user config dir | `settings` table |
 | Data | user data dir | `/data` volume |
 
 - The original key files can be deleted after import; the docs recommend it.
 - Secrets are never returned by the API or shown in the UI after saving; replacing one requires the admin password again.
 - `storepulse export-config` writes non-secret settings only; secrets are re-entered on a new machine by design.
-- Losing the hosted master key means re-entering credentials, not losing data.
+- Losing the hosted master key means re-entering credentials, not losing data. A different key is detected at startup (a sealed check value in `kv`) and the app refuses to start with a message saying so; it never decrypts garbage.
 
 ## Build phases for Claude Code
 
@@ -382,7 +394,8 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
 4. **Hosted shell → release v0.2 (hosted)**
    - Migration for Storage's hosted-mode additions: the `secrets`, `users` and `settings` tables, and the `apps` table's `display_name`, `pair_key`, `hidden`, and `pair_source` columns.
    - FastAPI app, admin account + TOTP, setup token, `DbEncryptedStore`, web setup flow, dashboard pages, in-process scheduler, Dockerfile, compose file, Caddy example.
-   - App pairing, pulled forward from Storage/Data sources/Web dashboard, which already describe it as a hosted-mode feature: `core/discovery.py`'s auto-pairing (matching, uniqueness and persistence rules in Data sources) and the Settings page's pairing controls, which write `pair_key`/`display_name`/`hidden` directly with `pair_source='user'`. A paired app becomes one App page and one digest per-app line instead of two: whichever metrics Storage's vocabulary marks `sum` under "Over several days" add across the pair's two `app_id`s for that combined line — money summed per currency, the same per-currency merge the digest already uses to combine Apple and Play proceeds, never converted or added across currencies. Every other metric (mean-weighted or last-value — vitals, `active_devices`, `active_subscriptions`, `active_trials`, …) is never summed across platforms and stays broken out per platform, the same way the App page already shows iOS and Android side by side. The digest's "top app" pick must rank a paired app by its merged installs, not either platform's alone. This is `core/digest.py` and `core/discovery.py` work, not just `web/`; local mode's `apps` rows never get a `pair_key` written, so its behavior is unchanged.
+   - Pulled forward from Phase 5 as working basics, since a login page can't ship without them: server-side sessions, CSRF tokens on every POST, login/TOTP/setup-token throttling (5 failures per 15 minutes per IP and per account), and a strict Content-Security-Policy. Phase 5 still audits and tests them.
+   - App pairing, pulled forward from Storage/Data sources/Web dashboard, which already describe it as a hosted-mode feature: `core/discovery.py`'s auto-pairing (matching, uniqueness and persistence rules in Data sources) and the Settings page's controls: pairing and un-pairing write `pair_key` with `pair_source='user'`; renaming and hiding write `display_name`/`hidden` and never touch `pair_key` or `pair_source`. A paired app becomes one App page and one digest per-app line instead of two: whichever metrics Storage's vocabulary marks `sum` under "Over several days" add across the pair's two `app_id`s for that combined line — money summed per currency, the same per-currency merge the digest already uses to combine Apple and Play proceeds, never converted or added across currencies. Every other metric (mean-weighted or last-value — vitals, `active_devices`, `active_subscriptions`, `active_trials`, …) is never summed across platforms and stays broken out per platform, the same way the App page already shows iOS and Android side by side. The digest's "top app" pick must rank a paired app by its merged installs, not either platform's alone. This is `core/digest.py` and `core/discovery.py` work, not just `web/`; local mode's `apps` rows never get a `pair_key` written, so its behavior is unchanged.
    - *Done when:* `docker compose up` to working dashboard and email in under 15 minutes; an unambiguous same-named iOS/Android pair auto-pairs into one App page and one digest line (money summed per currency, vitals still broken out per platform, "top app" ranked on the merged total); an app whose name matches more than one app on the other platform stays unpaired for Settings to resolve by hand; secrets are unreadable in the DB without the master key; image published to GHCR.
 5. **Security review**
    - Dependency audit, secret-redaction tests (grep logs and error pages for key material), CSRF and session tests, rate-limited login.

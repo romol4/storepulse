@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import logging
 
 from storepulse.cli.common import CliError, Env
 from storepulse.core import config
@@ -26,6 +27,9 @@ def cmd_serve(args: argparse.Namespace, env: Env) -> int:
     # `serve` always means hosted mode: settings and secrets live in the database, so any
     # CLI command this process runs (and the scheduler's runs) uses them too.
     config.enter_hosted_mode()
+    # A long-running server logs its runs at info level (`docker compose logs`); main()
+    # already installed the redacting handler on this logger.
+    logging.getLogger("storepulse").setLevel(logging.INFO)
 
     import uvicorn
 

@@ -38,7 +38,9 @@ receives fixes.
   you can reach it — it has no such file. Not currently offered on Windows with the
   file store; use Windows Credential Manager there instead.
 - **Where secrets never go:**
-  - `config.toml`, the SQLite database, raw report caches, or logs.
+  - `config.toml`, raw report caches, or logs.
+  - The SQLite database in local mode. In hosted mode they go there only encrypted
+    (below).
   - Log lines and error messages pass through a redaction filter.
 - **Who Storepulse talks to:**
   - Apple and Google.
@@ -54,3 +56,34 @@ receives fixes.
     cancellation survey responses*, which also exposes order details and buyers'
     city, state and postcode. Storepulse keeps only the buyer's country, and works
     without that permission (no Android revenue).
+
+## Hosted mode (the Docker image)
+
+- **The master key.** In hosted mode secrets are stored in the database's
+  `secrets` table, each AES-GCM encrypted and bound to its name. The key is derived
+  with HKDF-SHA256 from the master key (`STOREPULSE_MASTER_KEY`, or a Docker secret
+  file named by `STOREPULSE_MASTER_KEY_FILE`, at least 32 characters) and a random
+  per-database salt. The master key is never written to the database or the data
+  volume, so a copy of `storepulse.db` or a volume backup alone doesn't reveal your
+  credentials. Keep the key outside the volume and back it up separately.
+- **Losing or changing the master key** loses no data, only the stored credentials:
+  the app detects a different key at startup and refuses to start rather than
+  decrypt garbage. Start with the original key, or start on a fresh volume and
+  re-enter your credentials in Settings.
+- **Fingerprints, not secrets.** No page, API response or email ever shows a stored
+  secret. Settings shows a fingerprint (a keyed HMAC, so the database alone can't be
+  used to test guesses), the upload date and a *Test connection* button. Replacing
+  a saved credential asks for your password again.
+- **The admin account.** Passwords are hashed with argon2id; TOTP is optional and
+  its secret is stored encrypted like the credentials. The first-run setup token is
+  printed to the container log at each start until an admin exists, stored only as a
+  hash, and stops working once the admin account is created.
+- **Sessions and forms.** Sessions are server-side; the cookie holds a random token
+  whose hash is stored, and it is `HttpOnly`, `SameSite=Strict`, and `Secure` behind
+  HTTPS. Every form carries a CSRF token. Password, TOTP and setup-token attempts are
+  throttled to 5 failures per 15 minutes per IP and per account. Pages are served
+  with a strict Content-Security-Policy and load no third-party scripts, fonts or
+  CDNs (Chart.js is bundled).
+- **Network exposure.** The compose file binds port 8000 to `127.0.0.1` only. Put
+  a TLS reverse proxy in front before exposing it (see the README), and set
+  `STOREPULSE_TRUSTED_PROXIES` so throttling sees real client addresses.

@@ -227,3 +227,7 @@ secrets.enc
 keychain-wrapped.json
 config.toml
 run-passphrase
+
+# Hosted mode: never commit the master key or a local Caddyfile (docker/)
+master_key*
+docker/Caddyfile

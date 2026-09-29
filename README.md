@@ -6,17 +6,20 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (Phase 3b — local mode, v0.1).** What works today:
-> - Guided setup (`storepulse init`), credential checks (`storepulse doctor`) and
->   historical loads (`storepulse backfill`) for Apple sales, Apple subscription state
->   and subscription events, and Google Play installs, sales, earnings and vitals.
-> - A daily email digest (`storepulse run`, `storepulse digest --dry-run`) and OS-native
->   scheduling (`storepulse schedule install`).
+> **Status: early development (Phase 4 — hosted mode, v0.2).** What works today:
+> - **Local mode:** guided setup (`storepulse init`), credential checks
+>   (`storepulse doctor`) and historical loads (`storepulse backfill`) for Apple sales,
+>   Apple subscription state and subscription events, and Google Play installs, sales,
+>   earnings and vitals; a daily email digest (`storepulse run`,
+>   `storepulse digest --dry-run`) and OS-native scheduling (`storepulse schedule install`).
+> - **Hosted mode:** the same collectors and digest in a Docker container with a web
+>   dashboard, web setup, an admin login with optional two-factor, and a built-in
+>   scheduler (see "Hosted mode" below).
 >
 > Not built yet:
-> - The hosted web dashboard (Phase 4+).
 > - `storepulse status`, a weekly summary email, an optional CSV attachment on the
 >   digest, and a 30-day cache of raw downloaded report files.
+> - Apple analytics (impressions, page views) and RevenueCat (Phase 6).
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 
@@ -217,6 +220,112 @@ unlock your credentials, so only agree to this on a machine you trust. Declining
 the schedule uninstalled. This isn't yet supported on Windows with the file store — set
 up on a machine where Windows Credential Manager is reachable instead.
 
+## Hosted mode
+
+Hosted mode runs Storepulse on your own server, such as a small VPS or a home server,
+in one Docker container. It sends the same daily email and adds a web dashboard. Your
+keys stay on that server; nothing is sent anywhere except Apple, Google and your SMTP
+server.
+
+### Start it
+
+Requires Docker with Compose. From a checkout (or just the `docker/` folder):
+
+```bash
+cd docker
+# 1. The master key encrypts every credential you save. Make it once, keep a copy
+#    somewhere safe (a password manager), and never commit it.
+printf 'STOREPULSE_MASTER_KEY=%s\n' "$(openssl rand -base64 48)" > .env
+chmod 600 .env
+# 2. Start the container.
+docker compose up -d
+# 3. Copy the one-time setup token from the log.
+docker compose logs storepulse | grep "setup token"
+```
+
+Open `http://127.0.0.1:8000/setup` (or your domain, see below), paste the token, and
+create the admin account. Then **Settings** walks you through the same steps as
+`storepulse init`: Apple, Google Play, email and preferences. Each credential is checked
+live before it's saved. Next, **Sources → Load history** runs a first backfill. After that
+the built-in scheduler runs every day at the time set in Settings, in the time zone you
+choose there.
+
+### The master key
+
+- The master key is read only from `STOREPULSE_MASTER_KEY`, or from a Docker secret file
+  named by `STOREPULSE_MASTER_KEY_FILE`. It must be at least 32 characters.
+- Credentials are encrypted in the database under it (AES-GCM). The database alone
+  reveals no key, password or usable fingerprint.
+- **Lose the key and you re-enter your credentials; you don't lose data.** The app
+  refuses to start with a different key, and says so.
+
+### HTTPS and the reverse proxy
+
+The container listens on `127.0.0.1:8000` only. Put a reverse proxy with HTTPS in front
+of it:
+
+- **Caddy (simplest):** copy `docker/Caddyfile.example` to `docker/Caddyfile` and set
+  your domain. Caddy gets the certificate itself. You can also uncomment the `caddy`
+  service in `compose.yaml` to run it in the same project.
+- **nginx:** use `proxy_pass http://127.0.0.1:8000;`, and set `X-Forwarded-Proto` and
+  `X-Forwarded-For`.
+- **Apache:** use `ProxyPass / http://127.0.0.1:8000/`, `ProxyPassReverse`, and
+  `RequestHeader set X-Forwarded-Proto https`.
+
+If the proxy isn't on the same host, set `STOREPULSE_TRUSTED_PROXIES` in `docker/.env`
+to its address, so the app sees HTTPS and the real client IPs. Login throttling uses
+those IPs.
+
+### Signing in
+
+- There is one admin account. Turn on two-factor authentication in **Settings →
+  Account**; it works with any authenticator app.
+- Five wrong passwords, codes or setup tokens in 15 minutes lock that IP or account out
+  for 15 minutes.
+- A saved credential is never shown again. Settings shows only a fingerprint and the
+  date it was saved, and replacing or removing one asks for the admin password.
+
+### Commands inside the container
+
+The CLI works in the container and uses the database's settings and secrets:
+
+```bash
+docker compose exec storepulse storepulse run          # collect and send the digest now
+docker compose exec storepulse storepulse doctor       # test every credential
+docker compose exec storepulse storepulse backfill --source apple_sales --days 90
+```
+
+`init` and `schedule` aren't used there: setup happens in the web app, and the container
+has its own scheduler.
+
+### Apps: names, hiding and pairing
+
+- An iOS and an Android app with exactly the same store name (ignoring case) are shown
+  as one app, when that match is unambiguous.
+- Pair, unpair, rename or hide apps in **Settings → Apps**. Your pairing choices are
+  never overridden.
+- A hidden app leaves every list but still counts in totals, and still gets crash
+  warnings.
+
+### Upgrading
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Your data lives in the `storepulse-data` volume, and upgrades migrate it in place.
+
+### Without Docker
+
+Install the web extra, set `STOREPULSE_MASTER_KEY`, and run the server:
+
+```bash
+pipx install "storepulse[web]"
+storepulse serve --host 127.0.0.1 --port 8000
+```
+
+Data then goes in the usual user data directory; set `STOREPULSE_DATA_DIR` to change it.
+
 ## Where secrets live
 
 - **OS keychain (default):**
@@ -261,10 +370,10 @@ pytest -q
 
 The two dependency files:
 - `pyproject.toml` declares compatible version ranges, for installers.
-- `requirements-dev.lock` pins exact versions for development and CI.
+- `requirements-dev.lock` pins exact versions for development and CI, including the `[web]` extra; the Docker image installs against it too.
 
 To regenerate the lock file:
-`uv pip compile pyproject.toml --extra dev --universal --python-version 3.11 -o requirements-dev.lock`
+`uv pip compile pyproject.toml --extra dev --extra web --universal --python-version 3.11 -o requirements-dev.lock`
 
 Tests never touch the network. See `tests/fixtures/` for the sample reports.
 
