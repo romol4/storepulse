@@ -87,15 +87,33 @@ receives fixes.
 - **Network exposure.** The compose file binds port 8000 to `127.0.0.1` only. Put
   a TLS reverse proxy in front before exposing it (see the README), and set
   `STOREPULSE_TRUSTED_PROXIES` so throttling sees real client addresses.
+- **The Docker image.** The base image is pinned by digest and Dependabot bumps it;
+  the image built in CI is scanned for known vulnerabilities before merge.
+- **SMTP host validation.** Saving email settings or using *Test connection* makes
+  the server connect to whatever host you enter, from an authenticated admin
+  session. Storepulse refuses a host that resolves to a link-local address
+  (`169.254.0.0/16`, which on most clouds serves the instance-metadata endpoint —
+  the same class of target SSRF bugs are usually chasing), so an admin can't be
+  tricked or accidentally use the settings form to fetch cloud credentials from
+  the instance running the container. RFC1918 and loopback stay reachable: a
+  self-hosted mail relay on the same private network as the container is a normal,
+  supported setup, and the admin is already at the same trust level as whoever
+  deployed the container. An IP-literal host is checked directly with no DNS
+  lookup at all. A hostname is resolved once to check it and then resolved again,
+  separately, by the SMTP connection itself — in principle a DNS answer could
+  change between those two lookups (DNS rebinding) and slip past the check; this
+  gap is accepted rather than closed, given the admin-only trust model, rather
+  than pinning the connection to a single resolved address.
 
 ## Security review checklist
 
 Tracks `docs/SPEC.md`'s Phase 5a (local mode and supply chain) and 5b (hosted
-surface) "Done when" criteria. Most of 5b is already checked: PR #8 built the
+surface) "Done when" criteria. Most of 5b was already checked: PR #8 built the
 hosted surface this checklist originally scoped 5b to audit, its own tests cover
 several of these properties directly, and a same-day follow-up fixed a TOTP-replay
-issue this checklist called for. What's left below hasn't been verified by any PR
-or review yet.
+issue this checklist called for. The rest — an error-page secret sweep, Docker
+digest-pinning and scanning, the SMTP SSRF decision, and backfilled tests for two
+properties that were already true — closed out Phase 5b.
 
 ### Secrets and data at rest
 - [x] Local-mode keychain/encrypted-file paths, as documented above.
@@ -111,7 +129,12 @@ or review yet.
       logs.
 - [x] Log output or error messages, across every CLI command and both mail-send
       paths — swept broadly, not just unit-tested in isolation.
-- [ ] Hosted-mode error pages (404/405/500) and JSON responses. (5b)
+- [x] Hosted-mode error pages (404/405) and JSON responses, not just the normal-page
+      crawl (`test_no_page_or_response_contains_a_stored_secret`). A 500 isn't forced
+      in the same test; instead, `test_debug_mode_is_never_enabled` pins down the
+      precondition that makes a 500 safe (Starlette's debug traceback page, which can
+      embed a local variable's secret, is only ever reachable if `debug=True` — which
+      nothing sets).
 
 ### Supply chain
 - [x] Runtime dependencies pinned to compatible ranges, audited clean by `pip-audit`.
@@ -120,8 +143,9 @@ or review yet.
       especially `release.yml`, which holds PyPI trusted publishing and GHCR
       permissions.
 - [x] A secret-scanning step runs in CI.
-- [ ] The base Docker image is pinned by digest; the built image is scanned for
-      known vulnerabilities in CI. (5b)
+- [x] The base Docker image is pinned by digest (Dependabot bumps it, same as any
+      other dependency); the built image is scanned for known vulnerabilities in CI
+      (`aquasecurity/trivy-action`, failing the build on a CRITICAL/HIGH finding).
 
 ### Least privilege / no unexpected calls
 - [x] Setup guides request only the documented read-only roles; Android revenue is
@@ -134,21 +158,27 @@ or review yet.
       in-memory and reset on restart.
 - [x] A TOTP code cannot be replayed within its validity window (`claim_totp_step`).
 - [x] CSRF is rejected on every state-changing route; a GET never requires a token.
-- [ ] A new session token is issued on login (no session fixation from a pre-auth
-      cookie) — true today (`start_session` always mints a fresh token, kept
-      separate from the anonymous CSRF cookie used before login) but not backed
-      by a test. (5b)
-- [ ] Session expiry is enforced server-side end-to-end (`get_session`'s
-      `expires_at > now` check), not only via cookie `Max-Age` — true today but
-      not backed by a test. (5b)
+- [x] A new session token is issued on login (no session fixation from a pre-auth
+      cookie) — `start_session` always mints a fresh token, kept separate from the
+      anonymous CSRF cookie used before login, backed by
+      `test_login_rotates_the_session_token`.
+- [x] Session expiry is enforced server-side end-to-end (`get_session`'s
+      `expires_at > now` check), not only via cookie `Max-Age` — backed by
+      `test_expired_session_is_rejected_server_side`, which forces expiry with a raw
+      SQL update rather than relying on the cookie's own lifetime.
 - [x] `X-Forwarded-For` is not trusted for rate-limiting/throttle keys unless
       `STOREPULSE_TRUSTED_PROXIES` is explicitly configured (uvicorn's
       `forwarded_allow_ips`, default `127.0.0.1`).
-- [ ] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
-      any app-controlled label (test: an app literally named `</script><script>...`). (5b)
-- [ ] The SMTP-test-connection feature's ability to reach internal hosts from an
-      admin session is a documented, deliberate decision, not an oversight. (5b)
+- [x] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
+      any app-controlled label. No real caller feeds it one today — `_chart_json`
+      only ever serializes computed dates and floats — so
+      `test_chart_json_escapes_a_literal_script_close` calls it directly with a
+      `</script><script>...` string in place of a date, pinning the escaping down
+      as a property of the function rather than of today's callers.
+- [x] The SMTP-test-connection feature's ability to reach internal hosts from an
+      admin session is a documented, deliberate decision, not an oversight — see
+      "SMTP host validation" below.
 
 ### Second review
-- [ ] A full Claude review pass over the hosted surface finds no open high-severity
-      issue — blocked on the items still open above. (5b)
+- [x] A full Claude review pass over the hosted surface, covering everything this
+      checklist tracks, finds no open high-severity issue.
