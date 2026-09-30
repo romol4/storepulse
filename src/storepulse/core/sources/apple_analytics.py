@@ -28,6 +28,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
+import httpx
+
 from storepulse.core import db
 from storepulse.core.sources.apple_client import (
     DOCS_HINT,
@@ -184,11 +186,15 @@ def list_instances(client: AppleClient, report_id: str) -> list[InstanceInfo]:
 def fetch_segments(client: AppleClient, instance_id: str) -> list[bytes]:
     """Lists an instance's segment download URLs and fetches each.
 
-    NOTE: if a segment's url turns out to be a pre-signed absolute URL to a different
-    host in practice (a common shape for bulk-download resources elsewhere in this kind
-    of API), routing it through client.get_bytes would attach this app's Apple bearer
-    token to a request bound for an unrelated host. Verify against a real response at
-    implementation time; if so, switch this to a plain, unauthenticated request instead.
+    Each url is fetched on its own terms rather than always through the authenticated
+    Apple client: a bulk-download resource like this commonly hands back a pre-signed
+    absolute URL to a different host (its signature is its own credential), and routing
+    that through client.get_bytes would attach this app's separate Apple API bearer
+    token to a request bound for a host that never asked for it — a live credential
+    leaked to whatever ends up serving that URL. An absolute URL is therefore always
+    fetched plain and unauthenticated; only a relative path (same-service call) uses
+    the client. This holds regardless of which shape a real response turns out to use,
+    still unverified per the module docstring.
     """
     body = client.get_json(
         f"/v1/analyticsReportInstances/{instance_id}/segments",
@@ -199,7 +205,15 @@ def fetch_segments(client: AppleClient, instance_id: str) -> list[bytes]:
         for item in (body.get("data") or [])
         if (url := (item.get("attributes") or {}).get("url"))
     ]
-    return [client.get_bytes(url, purpose="downloading a report segment") for url in urls]
+    return [_fetch_segment_url(client, url) for url in urls]
+
+
+def _fetch_segment_url(client: AppleClient, url: str) -> bytes:
+    if not url.startswith(("http://", "https://")):
+        return client.get_bytes(url, purpose="downloading a report segment")
+    response = httpx.get(url, timeout=60.0)
+    response.raise_for_status()
+    return response.content
 
 
 @dataclass(frozen=True)

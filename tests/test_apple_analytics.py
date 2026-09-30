@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import date
 
+import httpx
 import pytest
 
 from conftest import FT_APPS, FakeApple
@@ -245,3 +246,27 @@ def test_fetch_segments_downloads_each_url(p8_pem: str) -> None:
     )
     client = _client(fake, p8_pem)
     assert analytics.fetch_segments(client, "inst1") == [content]
+
+
+def test_fetch_segments_sends_no_apple_credential_to_an_absolute_url(
+    monkeypatch: pytest.MonkeyPatch, p8_pem: str
+) -> None:
+    """An absolute segment url is presumed pre-signed (its own signature is the
+    credential): it must be fetched plain, never carrying this app's separate Apple API
+    bearer token to a host that never asked for it."""
+    content = fixture_bytes("segment_normal.tsv.gz")
+    fake = FakeApple(analytics_segments={"inst1": ["https://cdn.example.com/segments/abc?sig=xyz"]})
+    client = _client(fake, p8_pem)
+    captured: dict[str, object] = {}
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return httpx.Response(200, content=content, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(analytics.httpx, "get", fake_get)
+    assert analytics.fetch_segments(client, "inst1") == [content]
+    assert captured["url"] == "https://cdn.example.com/segments/abc?sig=xyz"
+    assert "headers" not in captured["kwargs"]  # type: ignore[operator]
+    # Never reached the Apple-authenticated fake transport at all.
+    assert not any(r.url.path.startswith("/v1/analyticsReportSegments") for r in fake.requests)
