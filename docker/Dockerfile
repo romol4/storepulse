@@ -1,1 +1,42 @@
-IyBTdG9yZXB1bHNlIGhvc3RlZCBtb2RlIChkb2NzL1NQRUMubWQsIFBoYXNlIDQpLiBCdWlsZCBmcm9tIHRoZSByZXBvc2l0b3J5IHJvb3Q6CiMgICBkb2NrZXIgYnVpbGQgLWYgZG9ja2VyL0RvY2tlcmZpbGUgLXQgc3RvcmVwdWxzZSAuCiMgUHVibGlzaGVkIGFzIGdoY3IuaW8vcm9tb2w0L3N0b3JlcHVsc2UgYnkgLmdpdGh1Yi93b3JrZmxvd3MvcmVsZWFzZS55bWwuCgojIHB5dGhvbjozLjEyLXNsaW0gKERlcGVuZGFib3QgYnVtcHMgdGhpcyBkaWdlc3Q7IGEgdHJhaWxpbmcgY29tbWVudCBvbiBGUk9NIGlzbid0IHJlbGlhYmxlKQpGUk9NIHB5dGhvbjozLjEyLXNsaW1Ac2hhMjU2OmY3N2FjOWU0NGFlOTZlZjJjOTBiODA1M2VhMDhjMzFmOGJlMDMwZjgyNDE5NmIwYWU0ZGI2ZDQ2MmM4NGU1MWYgQVMgYnVpbGQKV09SS0RJUiAvc3JjClJVTiBwaXAgaW5zdGFsbCAtLW5vLWNhY2hlLWRpciAiYnVpbGQ+PTEuMiw8MiIKQ09QWSBweXByb2plY3QudG9tbCBSRUFETUUubWQgTElDRU5TRSByZXF1aXJlbWVudHMtZGV2LmxvY2sgLi8KQ09QWSBzcmMgLi9zcmMKUlVOIHB5dGhvbiAtbSBidWlsZCAtLXdoZWVsIC0tb3V0ZGlyIC9kaXN0CgojIHB5dGhvbjozLjEyLXNsaW0gKERlcGVuZGFib3QgYnVtcHMgdGhpcyBkaWdlc3Q7IGEgdHJhaWxpbmcgY29tbWVudCBvbiBGUk9NIGlzbid0IHJlbGlhYmxlKQpGUk9NIHB5dGhvbjozLjEyLXNsaW1Ac2hhMjU2OmY3N2FjOWU0NGFlOTZlZjJjOTBiODA1M2VhMDhjMzFmOGJlMDMwZjgyNDE5NmIwYWU0ZGI2ZDQ2MmM4NGU1MWYKTEFCRUwgb3JnLm9wZW5jb250YWluZXJzLmltYWdlLnNvdXJjZT0iaHR0cHM6Ly9naXRodWIuY29tL3JvbW9sNC9zdG9yZXB1bHNlIiBcCiAgICAgIG9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5kZXNjcmlwdGlvbj0iU3RvcmVwdWxzZSBob3N0ZWQgbW9kZTogQXBwIFN0b3JlICsgR29vZ2xlIFBsYXkgc3RhdHMsIGRhaWx5IGVtYWlsIGFuZCBkYXNoYm9hcmQiIFwKICAgICAgb3JnLm9wZW5jb250YWluZXJzLmltYWdlLmxpY2Vuc2VzPSJBcGFjaGUtMi4wIgpFTlYgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBcCiAgICBQWVRIT05VTkJVRkZFUkVEPTEgXAogICAgU1RPUkVQVUxTRV9NT0RFPWhvc3RlZCBcCiAgICBTVE9SRVBVTFNFX0RBVEFfRElSPS9kYXRhIFwKICAgIFNUT1JFUFVMU0VfQ09ORklHX0RJUj0vZGF0YS9jb25maWcKIyBXZWIgZGVwZW5kZW5jaWVzIGFyZSBoZWxkIHRvIHRoZSBleGFjdCB2ZXJzaW9ucyBDSSB0ZXN0cyAocmVxdWlyZW1lbnRzLWRldi5sb2NrKS4KQ09QWSAtLWZyb209YnVpbGQgL2Rpc3QgL2Rpc3QKQ09QWSByZXF1aXJlbWVudHMtZGV2LmxvY2sgL3RtcC9jb25zdHJhaW50cy50eHQKIyBUaGUgcGlubmVkIGRpZ2VzdCBhYm92ZSBsYWdzIERlYmlhbidzIHNlY3VyaXR5IHBhdGNoZXMgdW50aWwgRGVwZW5kYWJvdCBidW1wcyBpdDsKIyB0aGlzIGluc3RhbGxzIHRvZGF5J3MgcG9pbnQtcmVsZWFzZXMgc28gdGhlIGltYWdlIFRyaXZ5IHNjYW5zIGlzbid0IHN0dWNrIHdhaXRpbmcgb24gdGhhdC4KUlVOIGFwdC1nZXQgdXBkYXRlIFwKICYmIGFwdC1nZXQgdXBncmFkZSAteSBcCiAmJiBybSAtcmYgL3Zhci9saWIvYXB0L2xpc3RzLyogXAogJiYgd2hlZWw9IiQobHMgL2Rpc3Qvc3RvcmVwdWxzZS0qLndobCkiIFwKICYmIHBpcCBpbnN0YWxsIC0tbm8tY2FjaGUtZGlyIC0tY29uc3RyYWludCAvdG1wL2NvbnN0cmFpbnRzLnR4dCAiJHt3aGVlbH1bd2ViXSIgXAogJiYgcm0gLXJmIC9kaXN0IC90bXAvY29uc3RyYWludHMudHh0IFwKICYmIHVzZXJhZGQgLS1zeXN0ZW0gLS11aWQgMTAwMDEgLS1ob21lLWRpciAvZGF0YSAtLXNoZWxsIC91c3Ivc2Jpbi9ub2xvZ2luIHN0b3JlcHVsc2UgXAogJiYgbWtkaXIgLXAgL2RhdGEvY29uZmlnIFwKICYmIGNob3duIC1SIHN0b3JlcHVsc2UgL2RhdGEKVVNFUiBzdG9yZXB1bHNlClZPTFVNRSAvZGF0YQpFWFBPU0UgODAwMApIRUFMVEhDSEVDSyAtLWludGVydmFsPTMwcyAtLXRpbWVvdXQ9NXMgLS1zdGFydC1wZXJpb2Q9MjBzIFwKICBDTUQgWyJweXRob24iLCAiLWMiLCAiaW1wb3J0IHVybGxpYi5yZXF1ZXN0OyB1cmxsaWIucmVxdWVzdC51cmxvcGVuKCdodHRwOi8vMTI3LjAuMC4xOjgwMDAvaGVhbHRoeicsIHRpbWVvdXQ9NCkiXQpDTUQgWyJzdG9yZXB1bHNlIiwgInNlcnZlIiwgIi0taG9zdCIsICIwLjAuMC4wIiwgIi0tcG9ydCIsICI4MDAwIl0K
+# Storepulse hosted mode (docs/SPEC.md, Phase 4). Build from the repository root:
+#   docker build -f docker/Dockerfile -t storepulse .
+# Published as ghcr.io/romol4/storepulse by .github/workflows/release.yml.
+
+# python:3.12-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS build
+WORKDIR /src
+RUN pip install --no-cache-dir "build>=1.2,<2"
+COPY pyproject.toml README.md LICENSE requirements-dev.lock ./
+COPY src ./src
+RUN python -m build --wheel --outdir /dist
+
+# python:3.12-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+LABEL org.opencontainers.image.source="https://github.com/romol4/storepulse" \
+      org.opencontainers.image.description="Storepulse hosted mode: App Store + Google Play stats, daily email and dashboard" \
+      org.opencontainers.image.licenses="Apache-2.0"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    STOREPULSE_MODE=hosted \
+    STOREPULSE_DATA_DIR=/data \
+    STOREPULSE_CONFIG_DIR=/data/config
+# Web dependencies are held to the exact versions CI tests (requirements-dev.lock).
+COPY --from=build /dist /dist
+COPY requirements-dev.lock /tmp/constraints.txt
+# The pinned digest above lags Debian's security patches until Dependabot bumps it;
+# this installs today's point-releases so the image Trivy scans isn't stuck waiting on that.
+RUN apt-get update \
+ && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && wheel="$(ls /dist/storepulse-*.whl)" \
+ && pip install --no-cache-dir --constraint /tmp/constraints.txt "${wheel}[web]" \
+ && rm -rf /dist /tmp/constraints.txt \
+ && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin storepulse \
+ && mkdir -p /data/config \
+ && chown -R storepulse /data
+USER storepulse
+VOLUME /data
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+CMD ["storepulse", "serve", "--host", "0.0.0.0", "--port", "8000"]
