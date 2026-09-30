@@ -74,6 +74,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: docker build -f docker/Dockerfile -t storepulse:ci .
+      - name: Scan for known vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: storepulse:ci
+          scan-type: image
+          severity: CRITICAL,HIGH
+          exit-code: "1"
       - name: Refuses to start without a master key
         run: |
           if docker run --rm storepulse:ci > out.txt 2>&1; then
