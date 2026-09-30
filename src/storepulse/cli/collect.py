@@ -30,6 +30,11 @@ from storepulse.core.sources.google_auth import GoogleCredentialError, load_serv
 from storepulse.core.sources.google_client import parse_bucket_uri
 from storepulse.core.sources.play_common import Month, last_months, month_range
 
+# apple_analytics is deliberately absent: an ONGOING report request only produces
+# instances going forward from its own creation, with no equivalent of salesReports'
+# filter[reportDate] for an arbitrary past date, so a --from/--days backfill would have
+# no meaningful effect. The daily run's trailing window already catches up once the
+# request exists (docs/SPEC.md, Phase 6a).
 APPLE_DAILY = (apple_sales.SOURCE, apple_subscriptions.SOURCE, apple_subscription_events.SOURCE)
 PLAY_MONTHLY = (play_installs.SOURCE, play_sales.SOURCE, play_earnings.SOURCE)
 SOURCES = (*APPLE_DAILY, *PLAY_MONTHLY, play_vitals.SOURCE)
