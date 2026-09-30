@@ -10,6 +10,7 @@ import pytest
 from conftest import FT_APPS, FakeApple
 from conftest import analytics_fixture_bytes as fixture_bytes
 from storepulse.core import db, discovery
+from storepulse.core.secrets import redact
 from storepulse.core.sources import apple_analytics as analytics
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient
 from storepulse.core.sources.apple_sales import decode_report
@@ -270,3 +271,30 @@ def test_fetch_segments_sends_no_apple_credential_to_an_absolute_url(
     assert "headers" not in captured["kwargs"]  # type: ignore[operator]
     # Never reached the Apple-authenticated fake transport at all.
     assert not any(r.url.path.startswith("/v1/analyticsReportSegments") for r in fake.requests)
+
+
+def test_fetch_segments_registers_an_absolute_url_so_a_failure_is_redactable(
+    monkeypatch: pytest.MonkeyPatch, p8_pem: str
+) -> None:
+    """A pre-signed segment URL's query string is itself a credential: if the download
+    fails, httpx's own exception message embeds the full URL, which would otherwise
+    reach ingest_log's plaintext error column unredacted (docs/SPEC.md, Storage:
+    secrets never appear in the database's plaintext columns)."""
+    url = "https://cdn.example.com/segments/abc?sig=super-secret-signature-value"
+    fake = FakeApple(analytics_segments={"inst1": [url]})
+    client = _client(fake, p8_pem)
+
+    def raise_http_error(target: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("GET", target)
+        raise httpx.HTTPStatusError(
+            f"Client error '403 Forbidden' for url '{target}'",
+            request=request,
+            response=httpx.Response(403, request=request),
+        )
+
+    monkeypatch.setattr(analytics.httpx, "get", raise_http_error)
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        analytics.fetch_segments(client, "inst1")
+    message = str(exc_info.value)
+    assert url in message  # the scenario is real: httpx really does embed the full url
+    assert url not in redact(message)

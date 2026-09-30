@@ -31,6 +31,7 @@ from datetime import date
 import httpx
 
 from storepulse.core import db
+from storepulse.core.secrets import register_secret
 from storepulse.core.sources.apple_client import (
     DOCS_HINT,
     AppleAuthError,
@@ -195,6 +196,12 @@ def fetch_segments(client: AppleClient, instance_id: str) -> list[bytes]:
     fetched plain and unauthenticated; only a relative path (same-service call) uses
     the client. This holds regardless of which shape a real response turns out to use,
     still unverified per the module docstring.
+
+    An absolute URL is also registered as a secret before it's ever used: its query
+    string is a credential in its own right (that's the whole point of a pre-signed
+    link), and a failed download's exception message would otherwise carry it, unredacted,
+    into ingest_log's plaintext error column (docs/SPEC.md, Storage: secrets never appear
+    in the database's plaintext columns).
     """
     body = client.get_json(
         f"/v1/analyticsReportInstances/{instance_id}/segments",
@@ -205,6 +212,9 @@ def fetch_segments(client: AppleClient, instance_id: str) -> list[bytes]:
         for item in (body.get("data") or [])
         if (url := (item.get("attributes") or {}).get("url"))
     ]
+    for url in urls:
+        if url.startswith(("http://", "https://")):
+            register_secret(url)
     return [_fetch_segment_url(client, url) for url in urls]
 
 
