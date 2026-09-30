@@ -247,3 +247,17 @@ def test_range_within_window_untouched() -> None:
     assert len(span.dates) == 90 and span.skipped is None
     with pytest.raises(ValueError):
         runner.apple_sales_range(YESTERDAY, YESTERDAY - timedelta(days=1), today=TODAY)
+
+
+def test_apple_analytics_and_revenuecat_are_not_backfillable_sources() -> None:
+    """Neither has a meaningful historical range to request (docs/SPEC.md, Phase 6a/6b):
+    an ONGOING analytics report request only produces instances going forward from its
+    own creation, and RevenueCat's metrics overview always reflects the current moment.
+    argparse itself rejects an unknown --source, so there's no bespoke error path to
+    test beyond confirming neither name is a valid choice."""
+    from storepulse.cli.main import build_parser
+
+    parser = build_parser()
+    for source in ("apple_analytics", "revenuecat"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["backfill", "--source", source, "--days", "7"])

@@ -220,6 +220,48 @@ def test_failing_apple_subscriptions_does_not_block_sales_or_events(
     )
 
 
+def test_failing_apple_analytics_does_not_block_other_apple_sources(
+    conn: sqlite3.Connection, p8_pem: str
+) -> None:
+    """apple_analytics is per-app, unlike its three account-wide siblings (docs/SPEC.md);
+    a role-requirement 403 on its one-time report-request setup must not stop sales,
+    subscriptions or events from collecting normally in the same run."""
+    apple = FakeApple(
+        apps=FT_APPS,
+        default_report=fixture_bytes("summary_normal.tsv.gz"),
+        default_subscriptions_report=subscriptions_fixture_bytes("summary_normal.tsv.gz"),
+        default_subscription_events_report=subscription_events_fixture_bytes(
+            "summary_normal.tsv.gz"
+        ),
+        create_request_status=403,
+    )
+
+    result = runner.run_all(
+        conn,
+        _cfg(google=False, email=None),
+        apple_client=_apple_client(apple, p8_pem),
+        today=TODAY,
+        send_email=False,
+    )
+
+    assert not result.ok
+    assert any(e.startswith("apple_analytics:") for e in result.errors)
+    assert not any(e.startswith("apple_sales:") for e in result.errors)
+    assert not any(e.startswith("apple_subscriptions:") for e in result.errors)
+    assert not any(e.startswith("apple_subscription_events:") for e in result.errors)
+    for source in ("apple_sales", "apple_subscriptions", "apple_subscription_events"):
+        rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM daily_metrics WHERE source = ?", (source,)
+        ).fetchone()["n"]
+        assert rows > 0, f"expected rows from {source}"
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_analytics'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
 def test_discovery_refresh_registers_new_apps(conn: sqlite3.Connection, sa_json: str) -> None:
     assert db.apps_for(conn, "android") == {}
     google = FakeGoogle(objects=standard_objects())
