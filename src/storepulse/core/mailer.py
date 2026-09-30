@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import smtplib
 import ssl
 from collections.abc import Callable
@@ -74,7 +75,30 @@ def _wrap(config: EmailConfig, what: str, exc: Exception) -> MailerError:
     )
 
 
+def _reject_link_local(host: str) -> None:
+    """Refuse a literal link-local address (169.254.0.0/16, or its IPv6 equivalent
+    fe80::/10) — almost always a cloud metadata endpoint (AWS, GCP, Azure and
+    DigitalOcean all serve instance credentials from 169.254.169.254), never a real
+    mail server. Deliberately does not resolve hostnames: that would add a real DNS
+    call to every send/check, including in tests (this module has none today), and the
+    realistic attack here submits the well-known metadata IP directly rather than a
+    hostname that happens to resolve to it. RFC1918/loopback stay reachable — a
+    self-hosted mail relay on the same private network is a legitimate setup for a
+    self-hosted tool like this one (see SECURITY.md).
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return  # not a literal IP (a hostname, most commonly); nothing to check here
+    if ip.is_link_local:
+        raise MailerError(
+            f"refusing to connect to {host}: a link-local address is almost always a "
+            f"cloud metadata endpoint, not a mail server. {DOCS_HINT}"
+        )
+
+
 def _connect(config: EmailConfig, factory: SMTPFactory | None) -> SMTPLike:
+    _reject_link_local(config.host)
     make = factory or default_factory(config)
     try:
         client = make(config.host, config.port, DEFAULT_TIMEOUT)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import smtplib
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
 
 import pytest
@@ -211,6 +211,21 @@ def test_starttls_uses_a_verifying_context() -> None:
     fake = FakeSMTP()
     mailer.check(STARTTLS_CONFIG, "hunter2", factory=factory_for(fake))
     assert _is_verifying(fake.starttls_context)
+
+
+def test_link_local_host_is_rejected_before_connecting() -> None:
+    fake = FakeSMTP()
+    config = replace(STARTTLS_CONFIG, host="169.254.169.254")
+    with pytest.raises(mailer.MailerError, match="link-local"):
+        mailer.check(config, "hunter2", factory=factory_for(fake))
+    assert fake.calls == []  # the factory was never called
+
+
+def test_private_and_loopback_hosts_still_connect() -> None:
+    for host in ("10.0.0.5", "172.16.0.1", "192.168.1.1", "127.0.0.1"):
+        fake = FakeSMTP()
+        mailer.check(replace(STARTTLS_CONFIG, host=host), "hunter2", factory=factory_for(fake))
+        assert fake.calls[0] == f"connect:{host}:587:20.0"
 
 
 def test_test_message_addressed_to_all_recipients() -> None:
