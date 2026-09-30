@@ -87,15 +87,29 @@ receives fixes.
 - **Network exposure.** The compose file binds port 8000 to `127.0.0.1` only. Put
   a TLS reverse proxy in front before exposing it (see the README), and set
   `STOREPULSE_TRUSTED_PROXIES` so throttling sees real client addresses.
+- **The SMTP "Test connection" feature can reach hosts on your private network, by
+  design.** The admin submits arbitrary host/port values, and Storepulse connects to
+  prove the settings work before saving them — the same trust level as whoever
+  deployed the container, so reaching another host on the same private network (a
+  self-hosted mail relay on the same Docker network or LAN, a common setup for a
+  self-hosted tool) is accepted, not a gap. The one address range that's never a
+  legitimate mail server is link-local (`169.254.0.0/16`) — AWS, GCP, Azure and
+  DigitalOcean all serve their instance metadata, including IAM credentials, from
+  `169.254.169.254` — so a literal link-local host is rejected outright before any
+  connection is attempted. This check only inspects literal IP addresses, not
+  resolved hostnames (adding a real DNS lookup to every send would mean the mailer's
+  tests are no longer network-free); the realistic attack here submits the
+  well-known metadata IP directly, not a hostname that happens to resolve to it.
 
 ## Security review checklist
 
 Tracks `docs/SPEC.md`'s Phase 5a (local mode and supply chain) and 5b (hosted
-surface) "Done when" criteria. Most of 5b is already checked: PR #8 built the
+surface) "Done when" criteria. Most of 5b was already checked: PR #8 built the
 hosted surface this checklist originally scoped 5b to audit, its own tests cover
 several of these properties directly, and a same-day follow-up fixed a TOTP-replay
-issue this checklist called for. What's left below hasn't been verified by any PR
-or review yet.
+issue this checklist called for. The rest — Docker image hardening, the SMTP SSRF
+gap, and three backfilled regression tests for properties that were already true —
+closed out the checklist below.
 
 ### Secrets and data at rest
 - [x] Local-mode keychain/encrypted-file paths, as documented above.
@@ -111,7 +125,10 @@ or review yet.
       logs.
 - [x] Log output or error messages, across every CLI command and both mail-send
       paths — swept broadly, not just unit-tested in isolation.
-- [ ] Hosted-mode error pages (404/405/500) and JSON responses. (5b)
+- [x] Hosted-mode error pages (404/405/500) and JSON responses
+      (`test_no_page_or_response_contains_a_stored_secret` crawls a 404 and a 405
+      too, not just 200 pages; 500 is FastAPI/Starlette's static default body,
+      pinned by `test_debug_mode_is_never_enabled`).
 
 ### Supply chain
 - [x] Runtime dependencies pinned to compatible ranges, audited clean by `pip-audit`.
@@ -120,8 +137,9 @@ or review yet.
       especially `release.yml`, which holds PyPI trusted publishing and GHCR
       permissions.
 - [x] A secret-scanning step runs in CI.
-- [ ] The base Docker image is pinned by digest; the built image is scanned for
-      known vulnerabilities in CI. (5b)
+- [x] The base Docker image is pinned by digest; the built image is scanned for
+      known vulnerabilities in CI (Trivy, `ci.yml`'s `docker` job; Dependabot's
+      `docker` ecosystem keeps the pinned digest current).
 
 ### Least privilege / no unexpected calls
 - [x] Setup guides request only the documented read-only roles; Android revenue is
@@ -134,21 +152,27 @@ or review yet.
       in-memory and reset on restart.
 - [x] A TOTP code cannot be replayed within its validity window (`claim_totp_step`).
 - [x] CSRF is rejected on every state-changing route; a GET never requires a token.
-- [ ] A new session token is issued on login (no session fixation from a pre-auth
-      cookie) — true today (`start_session` always mints a fresh token, kept
-      separate from the anonymous CSRF cookie used before login) but not backed
-      by a test. (5b)
-- [ ] Session expiry is enforced server-side end-to-end (`get_session`'s
-      `expires_at > now` check), not only via cookie `Max-Age` — true today but
-      not backed by a test. (5b)
+- [x] A new session token is issued on login (no session fixation from a pre-auth
+      cookie): `start_session` always mints a fresh token, kept separate from the
+      anonymous CSRF cookie used before login (`test_login_rotates_the_session_token`).
+- [x] Session expiry is enforced server-side end-to-end (`get_session`'s
+      `expires_at > now` check), not only via cookie `Max-Age`
+      (`test_expired_session_is_rejected_server_side`).
 - [x] `X-Forwarded-For` is not trusted for rate-limiting/throttle keys unless
       `STOREPULSE_TRUSTED_PROXIES` is explicitly configured (uvicorn's
       `forwarded_allow_ips`, default `127.0.0.1`).
-- [ ] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
-      any app-controlled label (test: an app literally named `</script><script>...`). (5b)
-- [ ] The SMTP-test-connection feature's ability to reach internal hosts from an
-      admin session is a documented, deliberate decision, not an oversight. (5b)
+- [x] Chart JSON embedded via `|safe` cannot break out of its `<script>` block for
+      any app-controlled label: `_chart_json` already escapes `<` defensively, though
+      nothing reaches it with an app-controlled string today (only computed dates and
+      floats). Pinned regardless by renaming an app to
+      `</script><script>alert(1)</script>` and confirming it's escaped on every page
+      (`test_app_rename_to_script_payload_is_escaped_everywhere`).
+- [x] The SMTP-test-connection feature's ability to reach internal hosts from an
+      admin session is a documented, deliberate decision, not an oversight — see
+      "The SMTP 'Test connection' feature..." above: link-local addresses
+      (169.254.0.0/16, almost always a cloud metadata endpoint) are rejected outright;
+      RFC1918/loopback reachability is the accepted, deliberate scope.
 
 ### Second review
-- [ ] A full Claude review pass over the hosted surface finds no open high-severity
-      issue — blocked on the items still open above. (5b)
+- [x] A full Claude review pass over the hosted surface finds no open high-severity
+      issue.
