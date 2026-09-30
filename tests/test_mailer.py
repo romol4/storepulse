@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -219,3 +220,38 @@ def test_test_message_addressed_to_all_recipients() -> None:
     assert msg["To"] == "you@example.com, them@example.com"
     assert "Storepulse" in msg["Subject"]
     assert "test" in msg.get_content().lower()
+
+
+def _resolves_to(address: str) -> object:
+    return lambda host, port, *a, **kw: [(socket.AF_INET, 0, 0, "", (address, 0))]
+
+
+def test_connect_rejects_a_link_local_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cloud-metadata-endpoint SSRF vector: 169.254.169.254 must never be reachable
+    # from the SMTP settings form.
+    monkeypatch.setattr(mailer.socket, "getaddrinfo", _resolves_to("169.254.169.254"))
+    fake = FakeSMTP()
+    with pytest.raises(mailer.MailerError, match="link-local"):
+        mailer.check(STARTTLS_CONFIG, "hunter2", factory=factory_for(fake))
+    assert fake.calls == []  # rejected before the factory ever connected
+
+
+def test_connect_allows_a_private_range_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A self-hosted relay on the same private network as the container is a legitimate,
+    # documented setup; only link-local is blocked, not RFC1918.
+    monkeypatch.setattr(mailer.socket, "getaddrinfo", _resolves_to("10.0.0.5"))
+    fake = FakeSMTP()
+    mailer.check(STARTTLS_CONFIG, "hunter2", factory=factory_for(fake))
+    assert "noop" in fake.calls
+
+
+def test_connect_ignores_a_dns_failure_and_lets_the_real_attempt_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_gaierror(host: str, port: object, *a: object, **kw: object) -> object:
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(mailer.socket, "getaddrinfo", raise_gaierror)
+    fake = FakeSMTP(fail_connect=True)
+    with pytest.raises(mailer.MailerError, match="could not connect"):
+        mailer.check(STARTTLS_CONFIG, "hunter2", factory=factory_for(fake))

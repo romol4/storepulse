@@ -2,14 +2,16 @@
 #   docker build -f docker/Dockerfile -t storepulse .
 # Published as ghcr.io/romol4/storepulse by .github/workflows/release.yml.
 
-FROM python:3.12-slim AS build
+# python:3.12-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS build
 WORKDIR /src
 RUN pip install --no-cache-dir "build>=1.2,<2"
 COPY pyproject.toml README.md LICENSE requirements-dev.lock ./
 COPY src ./src
 RUN python -m build --wheel --outdir /dist
 
-FROM python:3.12-slim
+# python:3.12-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 LABEL org.opencontainers.image.source="https://github.com/romol4/storepulse" \
       org.opencontainers.image.description="Storepulse hosted mode: App Store + Google Play stats, daily email and dashboard" \
       org.opencontainers.image.licenses="Apache-2.0"
@@ -21,7 +23,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Web dependencies are held to the exact versions CI tests (requirements-dev.lock).
 COPY --from=build /dist /dist
 COPY requirements-dev.lock /tmp/constraints.txt
-RUN wheel="$(ls /dist/storepulse-*.whl)" \
+# The pinned digest above lags Debian's security patches until Dependabot bumps it;
+# this installs today's point-releases so the image Trivy scans isn't stuck waiting on that.
+RUN apt-get update \
+ && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && wheel="$(ls /dist/storepulse-*.whl)" \
  && pip install --no-cache-dir --constraint /tmp/constraints.txt "${wheel}[web]" \
  && rm -rf /dist /tmp/constraints.txt \
  && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin storepulse \
