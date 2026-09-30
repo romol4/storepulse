@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
 
+import httpx
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
@@ -142,6 +143,14 @@ def test_health_and_security_headers(site: Site) -> None:
     assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_debug_mode_is_never_enabled(site: Site) -> None:
+    """With debug on, Starlette embeds full tracebacks (including local variable
+    values — decrypted secrets could easily be in scope) into any unhandled-exception
+    response. No 500 currently reaches user code, so this is dormant, not live — but
+    cheap insurance against it ever becoming live by accident."""
+    assert site.client.app.debug is False  # type: ignore[attr-defined]
 
 
 def test_everything_redirects_to_setup_until_an_admin_exists(site: Site) -> None:
@@ -279,6 +288,39 @@ def test_session_cookie_flags(site: Site) -> None:
     response = site.client.post("/login", data={"csrf": csrf, "email": ADMIN, "password": PASSWORD})
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+
+
+def test_login_rotates_the_session_token(site: Site) -> None:
+    """Session fixation: a session token an attacker pre-set (e.g. by tricking a victim
+    into visiting a link with a crafted cookie) must never become valid just because the
+    same browser later logs in — start_session always mints a fresh token, never adopts
+    the incoming cookie's value."""
+    _setup_admin(site)
+    site.client.cookies.clear()
+    site.client.cookies.set(security.SESSION_COOKIE, "attacker-chosen-session-token")
+    csrf = site.csrf("/login")
+    response = site.client.post("/login", data={"csrf": csrf, "email": ADMIN, "password": PASSWORD})
+    assert response.status_code == 303
+    assert "attacker-chosen-session-token" not in response.headers["set-cookie"]
+
+
+def test_expired_session_is_rejected_server_side(site: Site) -> None:
+    """get_session checks expires_at server-side, independent of the cookie's own
+    Max-Age — but TestClient never independently expires cookies by Max-Age, so proving
+    that needs forcing the row itself into an expired state, the same way
+    test_a_pair_first_valid_this_run_s_email forces app state no route can reach."""
+    _setup_admin(site)
+    _login(site)
+    assert site.client.get("/").status_code == 200  # the session is valid before this
+    token = site.client.cookies.get(security.SESSION_COOKIE)
+    assert token is not None
+    conn = db.connect(config.db_path())
+    conn.execute(
+        "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+        ("2000-01-01T00:00:00+00:00", security.token_hash(token)),
+    )
+    conn.close()
+    assert site.client.get("/").headers["location"] == "/login"
 
 
 def test_login_is_throttled(site: Site) -> None:
@@ -500,6 +542,15 @@ def test_email_sends_a_test_before_saving(site: Site) -> None:
     assert site.smtp.sent == 1
 
 
+def test_email_host_rejects_link_local_addresses(site: Site) -> None:
+    """A link-local host (169.254.0.0/16) is almost always a cloud metadata endpoint,
+    reachable this way even though the admin never intended to reach it directly."""
+    _setup_admin(site)
+    blocked = _save_email(site, host="169.254.169.254")
+    assert blocked.status_code == 400 and "link-local" in blocked.text  # type: ignore[attr-defined]
+    assert site.smtp.sent == 0
+
+
 def test_remove_needs_the_admin_password(site: Site) -> None:
     _setup_admin(site)
     _save_email(site)
@@ -539,14 +590,28 @@ def test_no_page_or_response_contains_a_stored_secret(
         site.client.post(f"/settings/{s}/test", data={"csrf": csrf})
         for s in ("apple", "google", "email")
     ]
-    responses = [site.client.get(p) for p in paths] + posts
-    for response in responses:
-        assert response.status_code == 200, (response.url, response.status_code)
+
+    def _assert_clean(response: httpx.Response) -> None:
         body = response.text
         for secret in secrets:
             assert secret not in body, f"{response.url} leaks a secret"
         assert "PRIVATE KEY" not in body
         assert not re.search(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", body), f"{response.url} leaks a JWT"
+
+    responses = [site.client.get(p) for p in paths] + posts
+    for response in responses:
+        assert response.status_code == 200, (response.url, response.status_code)
+        _assert_clean(response)
+
+    # Error responses get the same crawl: not just the normal-page one above. 404/405
+    # currently render fixed, framework-default bodies with no dynamic content, but
+    # nothing pins that down against a future custom error handler leaking one.
+    not_found = site.client.get("/apps/999999")
+    assert not_found.status_code == 404
+    _assert_clean(not_found)
+    method_not_allowed = site.client.get("/logout")  # POST-only route
+    assert method_not_allowed.status_code == 405
+    _assert_clean(method_not_allowed)
     # Nor does the database file itself.
     raw = b"".join(p.read_bytes() for p in Path(config.db_path()).parent.glob("storepulse.db*"))
     for secret in (SMTP_PASSWORD, MASTER_KEY, *secrets[:3]):
@@ -635,6 +700,25 @@ def test_hidden_apps_and_renames(site: Site, p8_pem: str) -> None:
     assert response.status_code == 303
     app = next(a for a in db.list_apps(conn) if a.id == desk.id)
     assert (app.display_name, app.hidden, app.pair_source) == ("Desk", True, None)
+
+
+def test_app_rename_to_script_payload_is_escaped_everywhere(site: Site, p8_pem: str) -> None:
+    """_chart_json already escapes '<' defensively, though nothing reaches it with an
+    app-controlled string today (it only ever serializes computed dates and floats).
+    This pins the broader guarantee down regardless of which path a future field takes:
+    no app name, however it's set, can ever break out of a <script> block on any page."""
+    _setup_admin(site)
+    _save_apple(site, p8_pem)
+    conn = db.connect(config.db_path())
+    desk = next(a for a in db.list_apps(conn) if a.name == "deskFT")
+    payload = "</script><script>alert(1)</script>"
+    response = site.client.post(
+        "/settings/apps", data={"csrf": site.csrf("/settings"), f"name_{desk.id}": payload}
+    )
+    assert response.status_code == 303
+    site.client.app.state.hosted.jobs.run("test").result(timeout=60)  # type: ignore[attr-defined]
+    for page in (site.client.get("/").text, site.client.get(f"/apps/{desk.id}").text):
+        assert "</script><script>" not in page
 
 
 def test_manual_pair_and_unpair(site: Site, p8_pem: str, sa_json: str) -> None:
