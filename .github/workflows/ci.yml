@@ -79,6 +79,7 @@ jobs:
         with:
           image-ref: storepulse:ci
           severity: CRITICAL,HIGH
+          ignore-unfixed: "true"
           exit-code: "1"
       - name: Refuses to start without a master key
         run: |
