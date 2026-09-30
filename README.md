@@ -12,6 +12,9 @@ Play data into a local SQLite database. It works in two modes:
 >   Apple subscription state and subscription events, and Google Play installs, sales,
 >   earnings and vitals; a daily email digest (`storepulse run`,
 >   `storepulse digest --dry-run`) and OS-native scheduling (`storepulse schedule install`).
+>   Apple Analytics (impressions, page views per iOS app) is collected automatically
+>   alongside sales, using the same Apple key — no separate setup — and appears in the
+>   digest.
 > - **Hosted mode:** the same collectors and digest in a Docker container with a web
 >   dashboard, web setup, an admin login with optional two-factor, and a built-in
 >   scheduler (see "Hosted mode" below).
@@ -19,7 +22,7 @@ Play data into a local SQLite database. It works in two modes:
 > Not built yet:
 > - `storepulse status`, a weekly summary email, an optional CSV attachment on the
 >   digest, and a 30-day cache of raw downloaded report files.
-> - Apple analytics (impressions, page views) and RevenueCat (Phase 6).
+> - RevenueCat (Phase 6b).
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 
@@ -65,6 +68,10 @@ Limits:
 - Apple only keeps daily reports (sales, subscriptions, subscription events) for about a
   year, so dates older than 365 days are skipped with a warning.
 - Play months before the first report file are skipped silently.
+- Apple Analytics has no backfill command: it has no equivalent of the other reports'
+  "give me this specific past date," since an analytics report request only produces
+  data going forward from when it's created. The daily run (or `storepulse run`) picks
+  up whatever's available on its own.
 
 **Android revenue comes in two stages:**
 - The sales report updates daily. It gives *provisional* gross sales (`sales_gross`):
@@ -95,6 +102,15 @@ What the key can and can't do:
 
 If the key can't list apps, Storepulse adds apps from the sales reports as they
 appear.
+
+**Apple Analytics (impressions, page views) needs one thing more.** Setting up the
+one-time analytics report request for each app needs the **App Manager or Admin** role,
+not just Sales and Reports — Apple's only source here that isn't a plain read. Storepulse
+checks for an existing request first, so you have two options: grant the key App Manager
+or Admin once, or create the ongoing analytics report request yourself in App Store
+Connect (App Analytics → Reports → new ongoing request) and Storepulse will use it and
+never ask again. Skip both and Storepulse just won't collect impressions/page views;
+nothing else is affected.
 
 `storepulse init` checks the key before saving anything:
 1. It calls `GET /v1/apps` to confirm the key, key ID and issuer ID are accepted.
