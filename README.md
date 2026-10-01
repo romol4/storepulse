@@ -33,9 +33,7 @@ Play data into a local SQLite database. It works in two modes:
 Requires Python 3.11+ and [pipx](https://pipx.pypa.io/).
 
 ```bash
-# Once v0.1 is tagged, `pipx install storepulse` will work directly from PyPI.
-# Until then, install from GitHub:
-pipx install git+https://github.com/romol4/storepulse
+pipx install storepulse
 
 storepulse init     # guided setup for Apple and/or Google Play and email; validates
                     # each key and sends a test email before saving
