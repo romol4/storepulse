@@ -6,7 +6,8 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (Phase 4 — hosted mode, v0.2).** What works today:
+> **Status: early development (v0.3 — Apple Analytics & lifetime installs).** What works
+> today:
 > - **Local mode:** guided setup (`storepulse init`), credential checks
 >   (`storepulse doctor`) and historical loads (`storepulse backfill`) for Apple sales,
 >   Apple subscription state and subscription events, and Google Play installs, sales,
@@ -14,7 +15,8 @@ Play data into a local SQLite database. It works in two modes:
 >   `storepulse digest --dry-run`) and OS-native scheduling (`storepulse schedule install`).
 >   Apple Analytics (impressions, page views per iOS app) is collected automatically
 >   alongside sales, using the same Apple key — no separate setup — and appears in the
->   digest.
+>   digest. A lifetime installs total (everything ever collected, not just the recent
+>   window) appears in both the digest and, in hosted mode, the dashboard.
 > - **Hosted mode:** the same collectors and digest in a Docker container with a web
 >   dashboard, web setup, an admin login with optional two-factor, and a built-in
 >   scheduler (see "Hosted mode" below).
@@ -22,7 +24,7 @@ Play data into a local SQLite database. It works in two modes:
 > Not built yet:
 > - `storepulse status`, a weekly summary email, an optional CSV attachment on the
 >   digest, and a 30-day cache of raw downloaded report files.
-> - RevenueCat (Phase 6b).
+> - RevenueCat — deferred, no current plans to build it (see `docs/SPEC.md`, Phase 6b).
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 
@@ -167,7 +169,8 @@ and `uninstalls` is **User losses**, not device acquisitions.
 `storepulse run` collects from every source you've set up, then sends one digest email
 covering the 7 days ending on the most recent day with data, compared with the 7 days
 before, plus a lifetime installs total alongside it (everything ever collected, not just
-the 7-day window). `storepulse init` walks you through SMTP setup — host, port, security,
+the 7-day window — the same figure also appears on the hosted dashboard's Overview and
+App pages). `storepulse init` walks you through SMTP setup — host, port, security,
 username, password, from and to addresses — and sends a test email before saving
 anything.
 

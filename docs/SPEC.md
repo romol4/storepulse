@@ -4,7 +4,7 @@ Sep 25, 2026 · @Oleg
 
 ## Overview and goals
 
-Storepulse (working name) is an open-source tool any developer can run to pull their own App Store Connect and Google Play data into one place. It comes in two modes: **local** sends a daily email; **hosted** (self-hosted on the user's own server) sends the email and serves a web dashboard. LogicFT's FT apps are the first user.
+Storepulse is an open-source tool any developer can run to pull their own App Store Connect and Google Play data into one place. It comes in two modes: **local** sends a daily email; **hosted** (self-hosted on the user's own server) sends the email and serves a web dashboard. LogicFT's FT apps are the first user.
 
 **Goals**
 
@@ -23,7 +23,7 @@ Storepulse (working name) is an open-source tool any developer can run to pull t
 
 ## Open source project
 
-- **License:** Apache-2.0 (patent grant, business-friendly); see Open decisions.
+- **License:** Apache-2.0 (patent grant, business-friendly); confirmed, see Open decisions.
 - **Repo:** public GitHub repo; LogicFT's private git remains the dev mirror if preferred. Releases to PyPI and a Docker image on GHCR.
 - **Docs:** README with a 10-minute quickstart per mode, plus step-by-step guides with screenshots for creating the Apple API key and the Google service account (the hardest part for new users).
 - **Hygiene:** `SECURITY.md` with a private disclosure address, `CONTRIBUTING.md`, CI running tests and linting on every PR, pinned dependencies with Dependabot, signed release tags.
@@ -407,10 +407,12 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
    - Most of the original scope landed already, incidentally: Phase 4 built the `X-Forwarded-For` trust boundary correctly from the start, and a same-day follow-up fixed TOTP replay; throttle persistence is resolved as documented in-memory, reset on restart. What's actually left: an error-page and JSON-response secret sweep (404/405/500, not just the normal-page crawl Phase 4's tests already do); Docker image digest-pinning and vulnerability scanning in CI; and a decision — fix or document as deliberate — on the SMTP "Test connection" feature reaching arbitrary hosts from an authenticated admin session, since it currently has no allowlist/denylist for loopback or private ranges.
    - Two properties are true today but only verified by code review, not by a test: no session fixation (`start_session` always mints a fresh token) and server-side session expiry (`get_session`'s `expires_at` check, independent of the cookie's own `Max-Age`). A third, chart JSON embedded via `|safe`, isn't exploitable today (`_chart_json` only ever serializes dates and floats, never an app-controlled string) but has no test stopping a future field from reintroducing exactly that risk. Backfill regression tests for these three so "true by inspection" becomes "true and pinned down."
    - *Done when:* the hosted-mode items in `SECURITY.md`'s checklist pass — including the SMTP test-connection item, which the checklist already lists but this phase's scope previously didn't name — and a second reviewer (Claude review pass) finds no open high-severity issue. Two such passes already happened during Phase 4's review; this phase's pass only needs to cover what's still open above.
-6a. **Apple analytics** (split from Phase 6 because Apple Analytics and RevenueCat are
-   independent data sources, each with its own config/secrets/runner/CLI/web wiring —
-   splitting keeps each PR reviewable, the same reasoning behind the 5a/5b split; like
-   5a/5b, only the phase that completes the milestone — 6b — claims the version bump)
+6a. **Apple analytics → v0.3** (split from Phase 6 because Apple Analytics and RevenueCat
+   are independent data sources, each with its own config/secrets/runner/CLI/web wiring —
+   splitting keeps each PR reviewable, the same reasoning behind the 5a/5b split. Originally
+   6b, not this phase, was meant to claim the version bump, the same way only the phase
+   completing a milestone did for 5a/5b; with 6b deferred with no plans to continue, this
+   phase and the lifetime-installs digest/dashboard addition claim v0.3 instead)
    - One-time `analyticsReportRequests` setup per app (`accessType: ONGOING`, adopting an
      already-existing request rather than creating a duplicate), daily `DAILY`-granularity
      instance listing and segment downloads for the App Store Discovery and Engagement
@@ -430,15 +432,16 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
      run's trailing window naturally catches up once the request exists.
    - *Done when:* impressions and page views appear per iOS app in the digest, and setup is
      not repeated on later runs.
-6b. **RevenueCat → v0.3** — **deferred, not scheduled**
-   - *Status:* deferred, not cancelled. RevenueCat is optional; the store reports already
-     supply revenue (Sales and Earnings) and subscription state (Phase 3b); and LogicFT's own
-     apps have no confirmed subscription products to dogfood against. MRR is the one metric
-     the store reports can't give directly, and nothing in the digest or dashboard displays it
-     yet. Pick this phase up when a user who already runs RevenueCat wants MRR or near-real-time
-     subscription counts. Until then no RevenueCat code, setting or secret ships.
-   - Because 6a left the version bump to the phase that completes the milestone, the v0.3
-     bump stays unclaimed while this is deferred; decide what v0.3 contains before releasing.
+6b. **RevenueCat** — **deferred, no plans to continue**
+   - *Status:* deferred with no current plans to build it, not merely paused awaiting a
+     convenient time. RevenueCat is optional; the store reports already supply revenue
+     (Sales and Earnings) and subscription state (Phase 3b); and LogicFT's own apps have no
+     confirmed subscription products to dogfood against. MRR is the one metric the store
+     reports can't give directly, and nothing in the digest or dashboard displays it. v0.3
+     ships without this phase — Apple Analytics (6a) and the lifetime-installs addition
+     complete that milestone instead, so this phase claims no version bump. If a concrete
+     need for RevenueCat's metrics comes up later, the scope below is the starting point,
+     and it would ship under whatever version is current then.
    - A first implementation (PR #22) was closed unmerged. Its review findings are on that PR;
      resolve them before reusing it, above all by checking the metrics-overview response
      shape against a real account; that shape was never verified. The scope below is unchanged.
@@ -456,13 +459,28 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
      before saving, and a revoked or invalid key surfaces as a clear, redacted error on the
      Sources page rather than a silent gap.
 
+**Lifetime installs → v0.3** (not a numbered phase — a small follow-up requested directly,
+not part of the original roadmap, but it joins 6a in completing v0.3 now that 6b is deferred)
+   - A "Lifetime" line in the email digest (text and HTML), right below the 7-day Installs
+     line: every `installs` row either platform has ever written, combined, per-platform,
+     unwindowed — the same rules as the weekly figure (never `redownloads`, `—` for a
+     platform with no data yet, account-wide so a hidden app still counts). No new source,
+     config, or secret; it surfaces data `daily_metrics` already stores. Capped only by how
+     far back each source's own data goes (Apple's report retention tops a backfill out at
+     365 days; Play's bucket goes back to each app's launch).
+   - Also shown on the hosted dashboard's Overview and App pages, alongside the existing
+     7/30/90-day ranges, not replacing them.
+   - *Done when:* the lifetime total appears in the digest and on both dashboard pages,
+     matches a manual sum of `daily_metrics` for a test account, and is per-app on the App
+     page, combined on Overview.
+
 For every phase: parser unit tests against scrubbed sample reports in `tests/fixtures/`, no network calls in tests, and LogicFT's own FT apps as the live dogfood account.
 
 ## Open decisions
 
 - [x] **Revenue source** (Phase 3b). Store reports for everything, resolved in favor of the simpler option: RevenueCat (Phase 6b) hadn't been started when Phase 3b needed `active_subscriptions`/`active_trials`/`subscription_churn`, so there was nothing to narrow this phase's scope against. A later RevenueCat phase can still narrow or retire what the Apple subscription sources cover.
 - [x] **Currency conversion** (Phase 3). Proceeds are shown per currency, with no conversion and no new outbound calls (no daily reference rate lookup). A converted total is shown only if the user sets fixed rates and a display currency in `config.toml`'s `[digest]` section.
-- [ ] **Language.** Python (current draft: mature JWT, GCS, keyring, and web libraries; `pipx` install) or Go for a single static binary that non-Python users install more easily.
-- [ ] **License.** Apache-2.0 (current draft) or MIT for maximum adoption, or AGPL-3.0 if anyone running a modified version as a public service should have to share their changes. This also affects whether LogicFT could later sell a managed, per-customer-isolated hosted version.
-- [ ] **Name.** Storepulse is a placeholder; check PyPI, GitHub, and trademark conflicts before the first public release.
-- [ ] **Backfill depth.** How far back to load on first run (Apple sales keeps daily reports for about a year; Play bucket files go back to each app's launch).
+- [x] **Language** (v0.3). Python, confirmed: mature JWT, GCS, keyring, and web libraries, and `pipx install` already working end to end since v0.1. No plan to port to Go.
+- [x] **License** (v0.3). Apache-2.0, confirmed. `LICENSE` already carries it; no change needed.
+- [x] **Name** (v0.3). Storepulse, confirmed: checked for PyPI, GitHub, and trademark conflicts, and the name is available. No longer a placeholder.
+- [x] **Backfill depth** (v0.3). The `init` wizard's and hosted Settings' first-backfill defaults: Apple (daily reports) defaults to 30 days back (`DEFAULT_APPLE_DAYS`, `cli/setup.py`); Google Play (monthly report files) defaults to 3 months back (`DEFAULT_PLAY_MONTHS`), unchanged. Both remain user-editable at setup time (the wizard's prompt, or the hosted Sources page's "Load history" form) — these are just the suggested starting points, not a hard cap; `storepulse backfill` itself takes any explicit range.

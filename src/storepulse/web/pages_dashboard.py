@@ -74,6 +74,7 @@ def overview(request: Request, range: str | None = None) -> Response:
                     {
                         "group": group,
                         "installs": s.total,
+                        "lifetime_installs": sum(dashboard.lifetime_installs(conn, group.ids)),
                         "proceeds": dashboard.money(conn, as_of, days, group.ids),
                         "crash": _pct(vitals.get("crash_rate_28d")),
                         "anr": _pct(vitals.get("anr_rate_28d")),
@@ -85,6 +86,7 @@ def overview(request: Request, range: str | None = None) -> Response:
                 "chart": _chart_json(series),
                 "proceeds": dashboard.money(conn, as_of, days),
                 "sales_gross": dashboard.money(conn, as_of, days, metric="sales_gross"),
+                "lifetime_installs": sum(dashboard.lifetime_installs(conn)),
                 "rows": rows,
             }
     return render(request, "overview.html", context)
@@ -107,6 +109,7 @@ def app_page(request: Request, key: str, range: str | None = None) -> Response:
                 s = dashboard.installs_series(conn, as_of, days, [app.id])
                 entry |= {
                     "installs": s.total,
+                    "lifetime_installs": sum(dashboard.lifetime_installs(conn, [app.id])),
                     "chart": _chart_json(s),
                     "proceeds": dashboard.money(conn, as_of, days, [app.id]),
                     "countries": dashboard.top_countries(conn, as_of, days, [app.id]),
@@ -167,7 +170,7 @@ def run_now(request: Request, csrf: FormStr = "") -> Response:
 
 @router.post("/sources/backfill")
 def backfill(
-    request: Request, csrf: FormStr = "", apple_days: FormInt = 90, play_months: FormInt = 3
+    request: Request, csrf: FormStr = "", apple_days: FormInt = 30, play_months: FormInt = 3
 ) -> Response:
     state = hosted(request)
     with state.database() as conn:

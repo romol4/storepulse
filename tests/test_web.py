@@ -10,7 +10,7 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -689,6 +689,28 @@ def test_app_page_shows_platforms_side_by_side(site: Site, p8_pem: str, sa_json:
     assert page.count("<h2>iOS") == 1 and page.count("<h2>Android") == 1
     assert "Crash rate, 28 days" in page
     assert site.client.get("/apps/999999").status_code == 404
+
+
+def test_overview_and_app_page_show_lifetime_installs(site: Site, p8_pem: str) -> None:
+    """40 days of installs, written directly: the 30-day range sees only 30 of them, but
+    the lifetime figure sums all 40 -- on both the Overview and the App page."""
+    _setup_admin(site)
+    _save_apple(site, p8_pem)
+    conn = db.connect(config.db_path())
+    desk = next(a for a in db.list_apps(conn) if a.name == "deskFT")
+    for i in range(40):
+        d = (date(2026, 9, 26) - timedelta(days=i)).isoformat()
+        db.replace_source_day(
+            conn, "apple_sales", d, [db.MetricRow(d, desk.id, "US", "installs", "", 1.0)]
+        )
+    conn.close()
+
+    overview = site.client.get("/?range=30").text
+    assert "Lifetime installs" in overview
+    assert "40" in overview  # the 30-day range tile shows 30, the lifetime tile shows 40
+
+    app_page = site.client.get(f"/apps/{desk.id}?range=30").text
+    assert "40 lifetime installs" in app_page
 
 
 def test_hidden_apps_and_renames(site: Site, p8_pem: str) -> None:
