@@ -41,7 +41,7 @@ from storepulse.core.sources.play_common import last_months
 
 C = TypeVar("C")
 
-DEFAULT_APPLE_DAYS = 90
+DEFAULT_APPLE_DAYS = 30  # docs/SPEC.md, Open decisions: Backfill depth
 DEFAULT_PLAY_MONTHS = 3
 DEFAULT_VITALS_DAYS = 30
 

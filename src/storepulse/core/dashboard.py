@@ -116,6 +116,30 @@ def installs_series(
     )
 
 
+def lifetime_installs(
+    conn: sqlite3.Connection, app_ids: Collection[int] | None = None
+) -> tuple[float, float]:
+    """(iOS total, Android total) installs since the first collected day -- the same
+    query shape as installs_series, just without a date bound. Same per-platform rule as
+    everywhere else: apple_sales sums its own per-country rows (it writes no ``ALL``
+    row); play_installs reads only its ``ALL`` row (never adds the countries to it)."""
+    clause, extra = _in(app_ids)
+    totals = {"ios": 0.0, "android": 0.0}
+    for platform, source, all_only in (
+        ("ios", apple_sales.SOURCE, False),
+        ("android", play_installs.SOURCE, True),
+    ):
+        where = "source = ? AND metric = 'installs'" + clause
+        if all_only:
+            where += " AND country = 'ALL'"
+        row = conn.execute(
+            f"SELECT COALESCE(SUM(value), 0) AS v FROM daily_metrics WHERE {where}",  # noqa: S608
+            [source, *extra],
+        ).fetchone()
+        totals[platform] = float(row["v"])
+    return totals["ios"], totals["android"]
+
+
 def money(
     conn: sqlite3.Connection,
     end: date,

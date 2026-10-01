@@ -16,6 +16,7 @@
   <div class="tiles">
     <div class="tile"><span class="label">Installs</span><span class="value">{{ series.total|count }}</span>
       <span class="sub">iOS {{ series.ios|sum|count }} · Android {{ series.android|sum|count }}</span></div>
+    <div class="tile"><span class="label">Lifetime installs</span><span class="value">{{ lifetime_installs|count }}</span></div>
     <div class="tile"><span class="label">Proceeds (net)</span>
       {% if proceeds %}{% for c, v in proceeds.items() %}<span class="value">{{ v|money(c) }}</span>{% endfor %}{% else %}<span class="value">—</span>{% endif %}</div>
     {% if sales_gross %}
@@ -31,13 +32,14 @@
   <section class="card">
     <h2>Apps</h2>
     <table>
-      <thead><tr><th>App</th><th>Platforms</th><th class="num">Installs</th><th>Proceeds</th><th class="num">Crash 28d</th><th class="num">ANR 28d</th></tr></thead>
+      <thead><tr><th>App</th><th>Platforms</th><th class="num">Installs</th><th class="num">Lifetime</th><th>Proceeds</th><th class="num">Crash 28d</th><th class="num">ANR 28d</th></tr></thead>
       <tbody>
       {% for row in rows %}
         <tr>
           <td><a href="/apps/{{ row.group.key }}?range={{ days }}">{{ row.group.label }}</a></td>
           <td>{{ row.group.platforms }}</td>
           <td class="num">{{ row.installs|count }}</td>
+          <td class="num">{{ row.lifetime_installs|count }}</td>
           <td>{% for c, v in row.proceeds.items() %}{{ v|money(c) }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td>
           <td class="num">{{ row.crash }}</td>
           <td class="num">{{ row.anr }}</td>

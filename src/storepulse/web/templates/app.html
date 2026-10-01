@@ -15,6 +15,7 @@
     {% if p.installs is defined %}
       <p><strong>{{ p.installs|count }}</strong> installs ·
         {% for c, v in p.proceeds.items() %}{{ v|money(c) }}{% if not loop.last %}, {% endif %}{% else %}no proceeds{% endfor %}</p>
+      <p class="muted small">{{ p.lifetime_installs|count }} lifetime installs</p>
       <div class="chart"><canvas class="app-chart" data-source="chart-{{ loop.index }}" aria-label="Daily installs"></canvas></div>
       <script type="application/json" id="chart-{{ loop.index }}">{{ p.chart|safe }}</script>
       <h3>Top countries</h3>
