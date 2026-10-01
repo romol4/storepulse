@@ -139,6 +139,8 @@ class _Context:
     android_installs: float
     prev_ios_installs: float
     prev_android_installs: float
+    lifetime_ios_installs: float
+    lifetime_android_installs: float
     proceeds: dict[str, float]
     prev_proceeds: dict[str, float]
     sales_gross: dict[str, float]
@@ -327,6 +329,36 @@ def _ios_installs(conn: sqlite3.Connection, window: Window, app_id: int | None =
     return _window_total(
         conn, apple_sales.SOURCE, "installs", window, all_only=False, app_id=app_id
     )
+
+
+def _lifetime_total(
+    conn: sqlite3.Connection, source: str, *, all_only: bool, app_id: int | None = None
+) -> float:
+    """Every ``installs`` row this source has ever written, unbounded by date -- the
+    same shape as _window_total, just without a BETWEEN clause. Capped only by how far
+    back this source's own data actually goes: Apple's report retention tops a backfill
+    out at 365 days, while Play's bucket goes back to each app's launch (docs/SPEC.md,
+    Apple: App Store Connect / Google: Play Console bulk reports)."""
+    where = "source = ? AND metric = 'installs'"
+    params: list[object] = [source]
+    if all_only:
+        where += " AND country = 'ALL'"
+    if app_id is not None:
+        where += " AND app_id = ?"
+        params.append(app_id)
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(value), 0) AS total FROM daily_metrics WHERE {where}",  # noqa: S608
+        params,
+    ).fetchone()
+    return float(row["total"])
+
+
+def _ios_lifetime_installs(conn: sqlite3.Connection, app_id: int | None = None) -> float:
+    return _lifetime_total(conn, apple_sales.SOURCE, all_only=False, app_id=app_id)
+
+
+def _android_lifetime_installs(conn: sqlite3.Connection, app_id: int | None = None) -> float:
+    return _lifetime_total(conn, play_installs.SOURCE, all_only=True, app_id=app_id)
 
 
 def _android_installs(conn: sqlite3.Connection, window: Window, app_id: int | None = None) -> float:
@@ -739,6 +771,27 @@ def _installs_summary(ctx: _Context) -> tuple[float, float, list[str]]:
     return combined, prev_combined, parts
 
 
+def _lifetime_installs_summary(ctx: _Context) -> tuple[float, list[str]]:
+    """(combined, per-platform parts) since this database's very first collected day --
+    not windowed to 7/30/90 days like everything else, and capped only by how far back
+    each source's own data goes (see _lifetime_total). Same unavailable-platform rule as
+    _installs_summary: shown as "—" and left out of the combined figure, never a real 0."""
+    combined = 0.0
+    parts: list[str] = []
+    for platform, label, configured, total in (
+        ("ios", "iOS", ctx.cfg.apple, ctx.lifetime_ios_installs),
+        ("android", "Android", ctx.cfg.google, ctx.lifetime_android_installs),
+    ):
+        if configured is None:
+            continue
+        if platform in ctx.unavailable:
+            parts.append(f"{label} {_NO_DATA}")
+            continue
+        combined += total
+        parts.append(f"{label} {total:,.0f}")
+    return combined, parts
+
+
 def _quiet_apps_text(count: int) -> str:
     noun = "app" if count == 1 else "apps"
     return f"+{count} more {noun} with no installs or proceeds in either week"
@@ -752,6 +805,10 @@ def _render_text(ctx: _Context) -> str:
     lines.append(
         f"{_label('Installs')}{combined:.0f}{_trend_suffix(combined, prev_combined)}{breakdown}"
     )
+
+    lifetime_combined, lifetime_parts = _lifetime_installs_summary(ctx)
+    lifetime_breakdown = f"   {f' {_DOT} '.join(lifetime_parts)}" if lifetime_parts else ""
+    lines.append(f"{_label('Lifetime')}{lifetime_combined:,.0f}{lifetime_breakdown}")
 
     if ctx.proceeds:
         parts = _proceeds_parts(ctx.proceeds, ctx.prev_proceeds)
@@ -810,6 +867,8 @@ def _html_escape(text: str) -> str:
 def _render_html(ctx: _Context) -> str:
     combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f" &mdash; {' &middot; '.join(breakdown_parts)}" if breakdown_parts else ""
+    lifetime_combined, lifetime_parts = _lifetime_installs_summary(ctx)
+    lifetime_breakdown = f" &mdash; {' &middot; '.join(lifetime_parts)}" if lifetime_parts else ""
 
     rows_html = []
     for row in ctx.app_rows:
@@ -899,6 +958,8 @@ def _render_html(ctx: _Context) -> str:
         f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.as_of)}</h2>'
         f'<p style="font-size:18px;margin:4px 0;">Installs: {combined:.0f}'
         f"{_trend_suffix(combined, prev_combined)}{breakdown}</p>"
+        f'<p style="color:#666;margin:4px 0;">Lifetime installs: {lifetime_combined:,.0f}'
+        f"{lifetime_breakdown}</p>"
         f"{proceeds_html}"
         f"{sales_gross_html}{top_app_html}{warnings_html}"
         f'<p style="color:#666;">Data: {ctx.data_line or "&mdash;"}</p>'
@@ -961,6 +1022,8 @@ def build_digest(
         android_installs=_android_installs(conn, window),
         prev_ios_installs=_ios_installs(conn, prev_window),
         prev_android_installs=_android_installs(conn, prev_window),
+        lifetime_ios_installs=_ios_lifetime_installs(conn),
+        lifetime_android_installs=_android_lifetime_installs(conn),
         proceeds=_proceeds_by_currency(conn, window),
         prev_proceeds=_proceeds_by_currency(conn, prev_window),
         sales_gross=_window_by_currency(conn, play_sales.SOURCE, "sales_gross", window),

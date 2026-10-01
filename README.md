@@ -166,8 +166,10 @@ and `uninstalls` is **User losses**, not device acquisitions.
 
 `storepulse run` collects from every source you've set up, then sends one digest email
 covering the 7 days ending on the most recent day with data, compared with the 7 days
-before. `storepulse init` walks you through SMTP setup — host, port, security, username,
-password, from and to addresses — and sends a test email before saving anything.
+before, plus a lifetime installs total alongside it (everything ever collected, not just
+the 7-day window). `storepulse init` walks you through SMTP setup — host, port, security,
+username, password, from and to addresses — and sends a test email before saving
+anything.
 
 ```bash
 storepulse digest --dry-run                 # print the digest without sending it

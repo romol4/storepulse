@@ -316,8 +316,9 @@ Sent through the user's own SMTP server (Gmail or Fastmail app password, SES, Po
 
 - HTML body with plain-text fallback; charts rendered server-side as small PNG images embedded inline (email clients strip SVG and JavaScript).
 - **As-of day:** each configured platform's own latest day with loaded data is found independently; the digest's as-of day is the minimum of those. That single date drives the header and every combined figure, so Apple and Play lagging by different amounts never produces mismatched totals. Phase 3 compares the 7 days ending on it with the 7 days before; a separate "yesterday" figure was simplified out for now.
-- Contents: 7-day totals vs the previous 7 days, per-app rows with a 30-day installs sparkline, proceeds listed per currency (no conversion; a converted total appears only when `config.toml`'s `[digest]` section sets fixed rates and a display currency — no new outbound calls), vitals warnings, and data freshness per source.
+- Contents: 7-day totals vs the previous 7 days, a lifetime installs total since this database's first collected day, per-app rows with a 30-day installs sparkline, proceeds listed per currency (no conversion; a converted total appears only when `config.toml`'s `[digest]` section sets fixed rates and a display currency — no new outbound calls), vitals warnings, and data freshness per source.
   - A configured platform that has never loaded data (e.g. Play bucket access still pending) shows as `—`, never `0`, and is left out of the combined totals and trend; its apps aren't listed. This is judged per platform, never against the shared as-of window, so a stalled platform can't make the other one read `—`. Vitals warnings cover every app, including collapsed ones and apps of a platform shown as `—`, since crash and ANR rates come from the Reporting API, not the installs reports. Apps with no installs or proceeds in either week collapse into one "+N more apps" line. Two apps sharing a name on one platform show their store ID. Vitals collected without any values from Google (common below its minimum user count) read `vitals ok (no data from Google)`.
+  - **Lifetime installs:** the same per-platform breakdown and `—`-for-unavailable rule as the 7-day Installs line, but unwindowed — every `installs` row either source has ever written (never `redownloads`, same metric scope as the weekly figure), capped only by how far back each source's own data actually goes: Apple's report retention tops a backfill out at 365 days, while Play's bucket goes back to each app's launch. No week-over-week trend, since there's no prior "lifetime" to compare against. Account-wide, like every other combined figure, so a hidden app's installs still count (Storage: hiding "still counts in combined totals and trends").
 - Local mode's `apps` table has the same `pair_key` column as hosted mode (Storage) — the schema doesn't differ — but local mode's CLI never writes it, so an iOS and Android build of the same app are always two separate rows there, never merged.
 - Optional weekly summary email and optional CSV attachment of the week's data.
 - In hosted mode the email links to the dashboard.
@@ -325,6 +326,7 @@ Sent through the user's own SMTP server (Gmail or Fastmail app password, SES, Po
 ```
 Storepulse · Thu Sep 24
 Installs  142 (+18% wk)   iOS 61 · Android 81
+Lifetime  48,310   iOS 29,117 · Android 19,193
 Proceeds  CA$213 (−4% wk)
 Top app   deskFT 58 installs
 Vitals    billFT Android crash rate 1.4% ⚠
