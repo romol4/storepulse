@@ -6,7 +6,7 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (Phase 4 — hosted mode, v0.2).** What works today:
+> **Status: early development (Phase 6b — RevenueCat, v0.3).** What works today:
 > - **Local mode:** guided setup (`storepulse init`), credential checks
 >   (`storepulse doctor`) and historical loads (`storepulse backfill`) for Apple sales,
 >   Apple subscription state and subscription events, and Google Play installs, sales,
@@ -14,7 +14,10 @@ Play data into a local SQLite database. It works in two modes:
 >   `storepulse digest --dry-run`) and OS-native scheduling (`storepulse schedule install`).
 >   Apple Analytics (impressions, page views per iOS app) is collected automatically
 >   alongside sales, using the same Apple key — no separate setup — and appears in the
->   digest.
+>   digest. RevenueCat (optional) is pulled once per run and stored as dated snapshots
+>   (MRR, active subscriptions, active trials, revenue); not shown in the digest or
+>   dashboard yet — only its collection status appears on the Sources page / Data line,
+>   so a revoked key is never silently invisible.
 > - **Hosted mode:** the same collectors and digest in a Docker container with a web
 >   dashboard, web setup, an admin login with optional two-factor, and a built-in
 >   scheduler (see "Hosted mode" below).
@@ -22,7 +25,8 @@ Play data into a local SQLite database. It works in two modes:
 > Not built yet:
 > - `storepulse status`, a weekly summary email, an optional CSV attachment on the
 >   digest, and a 30-day cache of raw downloaded report files.
-> - RevenueCat (Phase 6b).
+> - RevenueCat's own metrics in the digest and dashboard (only its collection status is
+>   surfaced so far — see above).
 >
 > See [`docs/SPEC.md`](docs/SPEC.md) for the full design and roadmap.
 
@@ -35,10 +39,11 @@ Requires Python 3.11+ and [pipx](https://pipx.pypa.io/).
 # Until then, install from GitHub:
 pipx install git+https://github.com/romol4/storepulse
 
-storepulse init     # guided setup for Apple and/or Google Play and email; validates
-                    # each key and sends a test email before saving
-storepulse doctor   # re-check every saved credential (reads metadata only; the
-                    # Apple check requests one day's sales report)
+storepulse init     # guided setup for Apple, Google Play, RevenueCat and/or email;
+                    # validates each key and sends a test email before saving
+storepulse doctor   # re-check every saved credential (reads metadata only; the Apple
+                    # check requests one day's sales report, RevenueCat fetches its
+                    # metrics overview)
 storepulse run      # collect every configured source, then send the digest
 ```
 
@@ -162,6 +167,29 @@ discovery.
 Compare installs like with like: `installs` is Play Console's **User acquisitions**
 and `uninstalls` is **User losses**, not device acquisitions.
 
+## RevenueCat
+
+Optional. If you use RevenueCat, Storepulse pulls its project metrics overview once per
+run and stores MRR, active subscriptions, active trials, and revenue as dated snapshots —
+useful for your own records even before they're shown anywhere.
+
+1. In the RevenueCat dashboard, go to **Project settings → API keys** and create a
+   **Secret v2 API key**. It's read-only.
+2. Copy the **project ID** from the same settings page.
+
+`storepulse init` (or the hosted Settings page) fetches the metrics overview once to
+confirm the key and project ID before saving anything. A revoked or invalid key doesn't
+fail silently afterward either: it shows up as a clear `error` on the Sources page and
+in the digest's Data line, the same way an expired Apple or Google credential would.
+
+**Not shown in the digest or dashboard yet** — only the collection status is, so a
+revoked key is never invisible. Surfacing MRR and the other metrics themselves is a
+follow-up.
+
+**Not part of `storepulse backfill`:** the metrics overview always reflects the current
+moment, so there's no historical date to ask for; the daily run (or `storepulse run`)
+simply pulls the latest numbers each time it runs.
+
 ## Email and the daily digest
 
 `storepulse run` collects from every source you've set up, then sends one digest email
@@ -261,7 +289,7 @@ docker compose logs storepulse | grep "setup token"
 
 Open `http://127.0.0.1:8000/setup` (or your domain, see below), paste the token, and
 create the admin account. Then **Settings** walks you through the same steps as
-`storepulse init`: Apple, Google Play, email and preferences. Each credential is checked
+`storepulse init`: Apple, Google Play, RevenueCat, email and preferences. Each credential is checked
 live before it's saved. Next, **Sources → Load history** runs a first backfill. After that
 the built-in scheduler runs every day at the time set in Settings, in the time zone you
 choose there.
