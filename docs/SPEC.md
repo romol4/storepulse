@@ -428,7 +428,18 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
      run's trailing window naturally catches up once the request exists.
    - *Done when:* impressions and page views appear per iOS app in the digest, and setup is
      not repeated on later runs.
-6b. **RevenueCat → v0.3**
+6b. **RevenueCat → v0.3** — **deferred, not scheduled**
+   - *Status:* deferred, not cancelled. RevenueCat is optional; the store reports already
+     supply revenue (Sales and Earnings) and subscription state (Phase 3b); and LogicFT's own
+     apps have no confirmed subscription products to dogfood against. MRR is the one metric
+     the store reports can't give directly, and nothing in the digest or dashboard displays it
+     yet. Pick this phase up when a user who already runs RevenueCat wants MRR or near-real-time
+     subscription counts. Until then no RevenueCat code, setting or secret ships.
+   - Because 6a left the version bump to the phase that completes the milestone, the v0.3
+     bump stays unclaimed while this is deferred; decide what v0.3 contains before releasing.
+   - A first implementation (PR #22) was closed unmerged. Its review findings are on that PR;
+     resolve them before reusing it, above all by checking the metrics-overview response
+     shape against a real account; that shape was never verified. The scope below is unchanged.
    - Secret v2 API key + project ID; pull the project metrics overview once per run and
      store MRR, active subscriptions, active trials, and revenue as dated snapshots in the
      `snapshots` table (schema already in place since Phase 1, unused until this phase).
