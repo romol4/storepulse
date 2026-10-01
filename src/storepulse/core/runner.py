@@ -19,6 +19,7 @@ from storepulse.core import config, db, digest, discovery, mailer
 from storepulse.core.secrets import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    REVENUECAT_KEY_SECRET,
     SMTP_PASSWORD_SECRET,
     SecretStore,
     redact,
@@ -32,6 +33,7 @@ from storepulse.core.sources import (
     play_installs,
     play_sales,
     play_vitals,
+    revenuecat,
 )
 from storepulse.core.sources.apple_client import AppleAuthError, AppleClient, AppleVendorError
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
@@ -42,6 +44,7 @@ from storepulse.core.sources.google_client import (
     parse_bucket_uri,
 )
 from storepulse.core.sources.play_common import Month, decode_csv, plan_month, read_zip_csv
+from storepulse.core.sources.revenuecat import RevenueCatClient
 
 log = logging.getLogger(__name__)
 
@@ -607,6 +610,67 @@ def collect_apple_analytics(
     return summary
 
 
+@dataclass
+class RevenueCatSummary:
+    ok: int = 0
+    rows: int = 0
+    error: str | None = None
+
+
+def collect_revenuecat(
+    conn: sqlite3.Connection, client: RevenueCatClient, today: date
+) -> RevenueCatSummary:
+    """Pull the project metrics overview once and store it as one dated snapshot
+    (docs/SPEC.md, Phase 6b). Unlike every other source, there is no historical date to
+    re-pull: the overview always reflects the current moment, so one attempt is the whole
+    collection. ``report_date`` is simply ``today`` -- the day the run happened, not a
+    lagged report date the way Apple's and Play's report_dates are."""
+    summary = RevenueCatSummary()
+    started = db.utc_now()
+    try:
+        metrics = revenuecat.parse_overview(client.fetch_overview())
+        rows = revenuecat.map_overview(metrics, taken_at=started)
+        written = db.record_snapshot(conn, rows)
+    except Exception as exc:
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.info("%s failed: %s", revenuecat.SOURCE, message)
+        summary.error = message
+        db.log_ingest(
+            conn,
+            source=revenuecat.SOURCE,
+            report_date=today.isoformat(),
+            started_at=started,
+            status="error",
+            note=message,
+        )
+        return summary
+    summary.ok = 1
+    summary.rows = written
+    db.log_ingest(
+        conn,
+        source=revenuecat.SOURCE,
+        report_date=today.isoformat(),
+        started_at=started,
+        status="ok",
+        rows=written,
+    )
+    return summary
+
+
+def _run_revenuecat(
+    conn: sqlite3.Connection,
+    client: RevenueCatClient,
+    today: date,
+    progress: Callable[[str, str], None],
+) -> str | None:
+    summary = collect_revenuecat(conn, client, today)
+    if summary.error:
+        progress(revenuecat.SOURCE, "error")
+        return f"{revenuecat.SOURCE}: {summary.error}"
+    progress(revenuecat.SOURCE, f"ok, {summary.rows} rows")
+    return None
+
+
 def group_errors(errors: Iterable[tuple[object, str]]) -> list[str]:
     """One line per distinct failure.
 
@@ -1103,13 +1167,14 @@ class RunClients:
 
     apple: AppleClient | None = None
     google: GoogleClient | None = None
+    revenuecat: RevenueCatClient | None = None
     smtp_password: str | None = None
     # A platform whose credential is missing or broken: reported like a source error,
     # never raised, so the other platform still runs (docs/SPEC.md).
     errors: list[str] = field(default_factory=list)
 
     def close(self) -> None:
-        for client in (self.apple, self.google):
+        for client in (self.apple, self.google, self.revenuecat):
             if client is not None:
                 client.close()
 
@@ -1151,6 +1216,16 @@ def clients_from_store(
                 clients.errors.append(f"google_auth: {exc}")
             else:
                 clients.google = GoogleClient(sa, transport=transport, sleep=sleep)
+    if cfg.revenuecat is not None:
+        key = store.get(REVENUECAT_KEY_SECRET)
+        if key is None:
+            clients.errors.append(
+                f"revenuecat: no RevenueCat key found in {store.describe()}; set it up again"
+            )
+        else:
+            clients.revenuecat = RevenueCatClient(
+                key, cfg.revenuecat.project_id, transport=transport, sleep=sleep
+            )
     if cfg.email is not None:
         clients.smtp_password = store.get(SMTP_PASSWORD_SECRET)
     return clients
@@ -1345,6 +1420,7 @@ def run_all(
     *,
     apple_client: AppleClient | None = None,
     google_client: GoogleClient | None = None,
+    revenuecat_client: RevenueCatClient | None = None,
     smtp_password: str | None = None,
     days: int | None = None,
     send_email: bool = True,
@@ -1411,6 +1487,11 @@ def run_all(
             vitals_error = _run_play_vitals(conn, google_client, vitals_dates, report)
             if vitals_error:
                 result.errors.append(vitals_error)
+
+        if cfg.revenuecat is not None and revenuecat_client is not None:
+            revenuecat_error = _run_revenuecat(conn, revenuecat_client, today, report)
+            if revenuecat_error:
+                result.errors.append(revenuecat_error)
 
         built = digest.build_digest(conn, cfg, today=today, dashboard_url=dashboard_url)
         result.digest = built

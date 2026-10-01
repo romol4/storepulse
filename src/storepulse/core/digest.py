@@ -30,6 +30,7 @@ from storepulse.core.sources import (
     play_installs,
     play_sales,
     play_vitals,
+    revenuecat,
 )
 from storepulse.core.sources.play_common import Month
 
@@ -66,11 +67,16 @@ _SOURCE_LABELS = {
     play_sales.SOURCE: "play_sales",
     play_earnings.SOURCE: "play_earnings",
     play_vitals.SOURCE: "vitals",
+    revenuecat.SOURCE: "revenuecat",
 }
 # daily: freshness measured in days since the newest 'ok' report_date.
 # monthly: this month's file (report_date = month's first day) must be 'ok' by day 4.
 # earnings: last month's earnings (report_date = that month's first day) must be 'ok'
 # by the 15th of the month following it, i.e. the 15th of the current month.
+# snapshot: like daily, but report_date is always *today* (the day the run happened),
+# never a lagged date -- RevenueCat's metrics overview has no historical date to re-pull,
+# so there is no trailing window of past report_dates to retry the way the other daily
+# sources have (docs/SPEC.md, Phase 6b).
 _SOURCE_CADENCE = {
     apple_sales.SOURCE: "daily",
     apple_subscriptions.SOURCE: "daily",
@@ -80,6 +86,7 @@ _SOURCE_CADENCE = {
     play_sales.SOURCE: "monthly",
     play_earnings.SOURCE: "earnings",
     play_vitals.SOURCE: "daily",
+    revenuecat.SOURCE: "snapshot",
 }
 
 
@@ -568,6 +575,12 @@ def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[st
         for source in (play_sales.SOURCE, play_earnings.SOURCE):
             if _seen(conn, source):
                 sources.append(source)
+    if cfg.revenuecat is not None:
+        # Unlike apple_subscriptions/apple_analytics, shown unconditionally, not only once
+        # seen: setup validates the key live before saving, so there's no "may legitimately
+        # never produce data" case to guard against here, and docs/SPEC.md explicitly wants
+        # a revoked key visible from the first failed run, not hidden until one succeeds.
+        sources.append(revenuecat.SOURCE)
     return sources
 
 
@@ -589,6 +602,8 @@ def _window_bounds(source: str, today: date, days: int) -> tuple[str, str]:
     if cadence == "earnings":
         prev = Month.of(today).prev()
         return prev.prev().first_day.isoformat(), prev.first_day.isoformat()
+    if cadence == "snapshot":
+        return today.isoformat(), today.isoformat()
     raise AssertionError(f"unknown cadence for {source!r}")
 
 
@@ -654,6 +669,8 @@ def _is_overdue(source: str, latest_ok: str | None, today: date, stale_days: int
     if cadence == "earnings":
         last_month_start = Month.of(today).prev().first_day.isoformat()
         return today.day > 15 and latest_ok != last_month_start
+    if cadence == "snapshot":
+        return latest_ok is None or (today - date.fromisoformat(latest_ok)).days > stale_days
     raise AssertionError(f"unknown cadence for {source!r}")
 
 
