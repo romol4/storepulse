@@ -20,6 +20,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 APPLE_FIXTURES = FIXTURES / "apple_sales"
 APPLE_SUBSCRIPTIONS_FIXTURES = FIXTURES / "apple_subscriptions"
 APPLE_SUBSCRIPTION_EVENTS_FIXTURES = FIXTURES / "apple_subscription_events"
+APPLE_ANALYTICS_FIXTURES = FIXTURES / "apple_analytics"
 
 
 def fixture_bytes(name: str) -> bytes:
@@ -32,6 +33,10 @@ def subscriptions_fixture_bytes(name: str) -> bytes:
 
 def subscription_events_fixture_bytes(name: str) -> bytes:
     return (APPLE_SUBSCRIPTION_EVENTS_FIXTURES / name).read_bytes()
+
+
+def analytics_fixture_bytes(name: str) -> bytes:
+    return (APPLE_ANALYTICS_FIXTURES / name).read_bytes()
 
 
 @pytest.fixture(scope="session")
@@ -146,8 +151,78 @@ class FakeApple:
     default_subscription_events_report: bytes | None = None
     requests: list[httpx.Request] = field(default_factory=list)
 
+    # Analytics (docs/SPEC.md, Phase 6a). Keyed by app store_id / request id / report id /
+    # instance id, mirroring the real resource nesting an app's existing requests, a
+    # request's reports, a report's instances, and an instance's segment download paths.
+    analytics_requests: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    create_request_status: int = 200
+    analytics_reports: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    analytics_instances: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    analytics_segments: dict[str, list[str]] = field(default_factory=dict)
+    segment_content: dict[str, bytes] = field(default_factory=dict)
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path == "/v1/analyticsReportRequests" and request.method == "POST":
+            if self.create_request_status != 200:
+                return apple_error(self.create_request_status, "forbidden", "FORBIDDEN_ERROR")
+            new_id = f"req{len(self.analytics_requests_created())}"
+            return httpx.Response(
+                201,
+                json={
+                    "data": {
+                        "type": "analyticsReportRequests",
+                        "id": new_id,
+                        "attributes": {"accessType": "ONGOING"},
+                    }
+                },
+            )
+        if request.url.path.startswith("/v1/apps/") and request.url.path.endswith(
+            "/analyticsReportRequests"
+        ):
+            store_id = request.url.path.split("/")[3]
+            data = [
+                {
+                    "type": "analyticsReportRequests",
+                    "id": r["id"],
+                    "attributes": {"accessType": r["accessType"]},
+                }
+                for r in self.analytics_requests.get(store_id, [])
+            ]
+            return httpx.Response(200, json={"data": data})
+        if request.url.path.startswith(
+            "/v1/analyticsReportRequests/"
+        ) and request.url.path.endswith("/reports"):
+            request_id = request.url.path.split("/")[3]
+            data = [
+                {"type": "analyticsReports", "id": r["id"], "attributes": {"name": r["name"]}}
+                for r in self.analytics_reports.get(request_id, [])
+            ]
+            return httpx.Response(200, json={"data": data})
+        if request.url.path.startswith("/v1/analyticsReports/") and request.url.path.endswith(
+            "/instances"
+        ):
+            report_id = request.url.path.split("/")[3]
+            data = [
+                {
+                    "type": "analyticsReportInstances",
+                    "id": i["id"],
+                    "attributes": {"processingDate": i["processingDate"]},
+                }
+                for i in self.analytics_instances.get(report_id, [])
+            ]
+            return httpx.Response(200, json={"data": data})
+        if request.url.path.startswith(
+            "/v1/analyticsReportInstances/"
+        ) and request.url.path.endswith("/segments"):
+            instance_id = request.url.path.split("/")[3]
+            data = [
+                {"type": "analyticsReportSegments", "attributes": {"url": u}}
+                for u in self.analytics_segments.get(instance_id, [])
+            ]
+            return httpx.Response(200, json={"data": data})
+        if request.url.path in self.segment_content:
+            return httpx.Response(200, content=self.segment_content[request.url.path])
         if request.url.path == "/v1/apps":
             if self.apps_status != 200:
                 return apple_error(self.apps_status, "forbidden", "FORBIDDEN_ERROR")
@@ -199,6 +274,15 @@ class FakeApple:
             for r in self.requests
             if r.url.path == "/v1/salesReports"
             and r.url.params.get("filter[reportType]", "SALES") == report_type
+        ]
+
+    def analytics_requests_created(self) -> list[httpx.Request]:
+        """Every POST /v1/analyticsReportRequests seen, in order — for asserting that
+        ensure_report_request never creates a duplicate."""
+        return [
+            r
+            for r in self.requests
+            if r.url.path == "/v1/analyticsReportRequests" and r.method == "POST"
         ]
 
 

@@ -178,6 +178,7 @@ class AppleClient:
         path: str,
         params: Mapping[str, str] | None = None,
         *,
+        json: Mapping[str, Any] | None = None,
         purpose: str = "this request",
     ) -> httpx.Response:
         """Send a request; retry 429/5xx/network errors with backoff; raise AppleError otherwise."""
@@ -187,7 +188,9 @@ class AppleClient:
             attempt += 1
             headers = {"Authorization": self._auth_header()}
             try:
-                response = self._http.request(method, path, params=params, headers=headers)
+                response = self._http.request(
+                    method, path, params=params, json=json, headers=headers
+                )
             except httpx.TransportError as exc:
                 if attempt >= MAX_ATTEMPTS:
                     raise AppleError(
@@ -246,3 +249,11 @@ class AppleClient:
         self, path: str, params: Mapping[str, str] | None = None, *, purpose: str = "this request"
     ) -> bytes:
         return self.request("GET", path, params, purpose=purpose).content
+
+    def post_json(
+        self, path: str, body: Mapping[str, Any], *, purpose: str = "this request"
+    ) -> dict[str, Any]:
+        result = self.request("POST", path, json=body, purpose=purpose).json()
+        if not isinstance(result, dict):
+            raise AppleError(f"unexpected response for {purpose}", 200, [])
+        return result

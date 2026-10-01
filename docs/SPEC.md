@@ -388,7 +388,7 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
 **3b. Apple subscription reports** (added after Phase 3, so the later phase numbers stay the same)
 - Daily `SUBSCRIPTION` and `SUBSCRIPTION_EVENT` reports from `GET /v1/salesReports` (see Apple: App Store Connect above for the verified columns, filters and derived-metric formulas). `active_subscriptions`, `active_trials` and `subscription_churn` are added to the vocabulary in this phase.
 - Auto-renewable subscription revenue already arrives through `IAY` rows in the daily Sales report; only the subscription state (active, trial, churn) was missing before this phase, and neither new source ever writes `proceeds`.
-- Resolves the open "Revenue source" decision in favor of "store reports for everything": RevenueCat (Phase 6) hasn't been started, so this phase is not limited by it. If RevenueCat is adopted later, a future phase can narrow or retire what these two sources cover.
+- Resolves the open "Revenue source" decision in favor of "store reports for everything": RevenueCat (Phase 6b) hasn't been started, so this phase is not limited by it. If RevenueCat is adopted later, a future phase can narrow or retire what these two sources cover.
 - *Done when:* fixture-driven parser and mapping tests hit exact, hand-verified totals for both reports, and re-runs don't change row counts. Comparing `active_subscriptions`/`active_trials` against App Store Connect's Subscriptions dashboard is deferred to whenever a subscription-bearing app is available to dogfood against — LogicFT's FT apps have no confirmed subscription products today.
 
 4. **Hosted shell → release v0.2 (hosted)**
@@ -405,15 +405,49 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
    - Most of the original scope landed already, incidentally: Phase 4 built the `X-Forwarded-For` trust boundary correctly from the start, and a same-day follow-up fixed TOTP replay; throttle persistence is resolved as documented in-memory, reset on restart. What's actually left: an error-page and JSON-response secret sweep (404/405/500, not just the normal-page crawl Phase 4's tests already do); Docker image digest-pinning and vulnerability scanning in CI; and a decision — fix or document as deliberate — on the SMTP "Test connection" feature reaching arbitrary hosts from an authenticated admin session, since it currently has no allowlist/denylist for loopback or private ranges.
    - Two properties are true today but only verified by code review, not by a test: no session fixation (`start_session` always mints a fresh token) and server-side session expiry (`get_session`'s `expires_at` check, independent of the cookie's own `Max-Age`). A third, chart JSON embedded via `|safe`, isn't exploitable today (`_chart_json` only ever serializes dates and floats, never an app-controlled string) but has no test stopping a future field from reintroducing exactly that risk. Backfill regression tests for these three so "true by inspection" becomes "true and pinned down."
    - *Done when:* the hosted-mode items in `SECURITY.md`'s checklist pass — including the SMTP test-connection item, which the checklist already lists but this phase's scope previously didn't name — and a second reviewer (Claude review pass) finds no open high-severity issue. Two such passes already happened during Phase 4's review; this phase's pass only needs to cover what's still open above.
-6. **Apple analytics + RevenueCat → v0.3**
-   - One-time analytics report request setup, segment downloads; RevenueCat snapshots.
-   - *Done when:* impressions and page views appear per iOS app and setup is not repeated on later runs.
+6a. **Apple analytics** (split from Phase 6 because Apple Analytics and RevenueCat are
+   independent data sources, each with its own config/secrets/runner/CLI/web wiring —
+   splitting keeps each PR reviewable, the same reasoning behind the 5a/5b split; like
+   5a/5b, only the phase that completes the milestone — 6b — claims the version bump)
+   - One-time `analyticsReportRequests` setup per app (`accessType: ONGOING`, adopting an
+     already-existing request rather than creating a duplicate), daily `DAILY`-granularity
+     instance listing and segment downloads for the App Store Discovery and Engagement
+     report. `impressions` and `page_views` — already reserved in the metric vocabulary —
+     are populated for the first time in this phase.
+   - Surfaced in the email digest only (plain text and HTML), the one surface every user
+     has regardless of mode; the hosted dashboard App page is left for a follow-up.
+   - Creating the report request needs Apple's App Manager or Admin role, unlike every
+     other Apple source (Sales and Reports alone). To keep the default credential ask at
+     Sales and Reports, setup first lists existing requests (readable with that role) and
+     only attempts to create one, surfacing the role requirement, if none exists — a user
+     who prefers not to grant the broader role can create the request by hand once in App
+     Store Connect and Storepulse adopts it.
+   - Not part of `storepulse backfill`: an `ONGOING` request only generates instances going
+     forward from its creation, with no equivalent of `salesReports`' `filter[reportDate]`
+     for arbitrary past dates, so a `--from` flag would have no meaningful effect. The daily
+     run's trailing window naturally catches up once the request exists.
+   - *Done when:* impressions and page views appear per iOS app in the digest, and setup is
+     not repeated on later runs.
+6b. **RevenueCat → v0.3**
+   - Secret v2 API key + project ID; pull the project metrics overview once per run and
+     store MRR, active subscriptions, active trials, and revenue as dated snapshots in the
+     `snapshots` table (schema already in place since Phase 1, unused until this phase).
+   - Not surfaced in the digest or dashboard in this phase — matching how Phase 3b shipped
+     `active_subscriptions`/`active_trials` with UI comparison deferred — only its
+     collection status (ok/not_ready/error) joins the Sources page and digest freshness
+     tracking, so a revoked key isn't invisible.
+   - Not part of `storepulse backfill`: the metrics overview always reflects the current
+     moment, so a historical `--from` is meaningless, the same reasoning as 6a.
+   - *Done when:* a configured RevenueCat account's MRR, active subscriptions, active
+     trials, and revenue land in `snapshots` on every run, setup validates the key live
+     before saving, and a revoked or invalid key surfaces as a clear, redacted error on the
+     Sources page rather than a silent gap.
 
 For every phase: parser unit tests against scrubbed sample reports in `tests/fixtures/`, no network calls in tests, and LogicFT's own FT apps as the live dogfood account.
 
 ## Open decisions
 
-- [x] **Revenue source** (Phase 3b). Store reports for everything, resolved in favor of the simpler option: RevenueCat (Phase 6) hadn't been started when Phase 3b needed `active_subscriptions`/`active_trials`/`subscription_churn`, so there was nothing to narrow this phase's scope against. A later RevenueCat phase can still narrow or retire what the Apple subscription sources cover.
+- [x] **Revenue source** (Phase 3b). Store reports for everything, resolved in favor of the simpler option: RevenueCat (Phase 6b) hadn't been started when Phase 3b needed `active_subscriptions`/`active_trials`/`subscription_churn`, so there was nothing to narrow this phase's scope against. A later RevenueCat phase can still narrow or retire what the Apple subscription sources cover.
 - [x] **Currency conversion** (Phase 3). Proceeds are shown per currency, with no conversion and no new outbound calls (no daily reference rate lookup). A converted total is shown only if the user sets fixed rates and a display currency in `config.toml`'s `[digest]` section.
 - [ ] **Language.** Python (current draft: mature JWT, GCS, keyring, and web libraries; `pipx` install) or Go for a single static binary that non-Python users install more easily.
 - [ ] **License.** Apache-2.0 (current draft) or MIT for maximum adoption, or AGPL-3.0 if anyone running a modified version as a public service should have to share their changes. This also affects whether LogicFT could later sell a managed, per-customer-isolated hosted version.

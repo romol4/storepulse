@@ -381,6 +381,81 @@ def test_html_vitals_crash_present_anr_missing(
     assert "crash 0.4% daily, 0.3% 28d &middot; anr — daily, — 28d" in result.html
 
 
+# -- analytics (docs/SPEC.md, Phase 6a) -----------------------------------------------------
+
+
+def _analytics_day(
+    conn: sqlite3.Connection, d: str, app_id: int, impressions: float, page_views: float
+) -> None:
+    db.replace_source_range(
+        conn,
+        "apple_analytics",
+        d,
+        d,
+        [
+            db.MetricRow(d, app_id, "ALL", "impressions", "", impressions),
+            db.MetricRow(d, app_id, "ALL", "page_views", "", page_views),
+        ],
+        app_ids=[app_id],
+    )
+
+
+def test_text_analytics_line_shown_when_present(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
+    _analytics_day(conn, AS_OF.isoformat(), ios_id, impressions=120, page_views=40)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "120 impressions, 40 page views" in result.text
+
+
+def test_html_analytics_shown_when_present(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
+    _analytics_day(conn, AS_OF.isoformat(), ios_id, impressions=120, page_views=40)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "120 impressions, 40 page views</div>" in result.html
+
+
+def test_analytics_absent_shows_nothing_not_zero(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """An iOS app with no apple_analytics rows at all must show no analytics line —
+    never "0 impressions", which would misreport a genuinely unmeasured app as one with
+    a real but empty week."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "impressions" not in result.text
+    assert "impressions" not in result.html
+
+
+def test_analytics_hidden_until_seen_on_data_line(conn: sqlite3.Connection, ios_id: int) -> None:
+    """Like apple_subscriptions: not every run has an analytics instance yet, so it only
+    joins the Data line once ingest_log has actually seen it."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_analytics" not in result.text
+
+
+def test_analytics_shown_on_data_line_once_seen(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "apple_analytics", AS_OF.isoformat(), app_id=ios_id)
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "apple_analytics ok" in result.text
+
+
 # -- overdue cadence rules -----------------------------------------------------------------
 
 

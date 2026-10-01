@@ -22,6 +22,7 @@ from html import escape
 
 from storepulse.core import charts, config
 from storepulse.core.sources import (
+    apple_analytics,
     apple_sales,
     apple_subscription_events,
     apple_subscriptions,
@@ -60,6 +61,7 @@ _SOURCE_LABELS = {
     apple_sales.SOURCE: "apple_sales",
     apple_subscriptions.SOURCE: "apple_subscriptions",
     apple_subscription_events.SOURCE: "apple_subscription_events",
+    apple_analytics.SOURCE: "apple_analytics",
     play_installs.SOURCE: "play_installs",
     play_sales.SOURCE: "play_sales",
     play_earnings.SOURCE: "play_earnings",
@@ -73,6 +75,7 @@ _SOURCE_CADENCE = {
     apple_sales.SOURCE: "daily",
     apple_subscriptions.SOURCE: "daily",
     apple_subscription_events.SOURCE: "daily",
+    apple_analytics.SOURCE: "daily",
     play_installs.SOURCE: "monthly",
     play_sales.SOURCE: "monthly",
     play_earnings.SOURCE: "earnings",
@@ -102,6 +105,8 @@ class AppRow:
     crash_rate_28d: float | None = None
     anr_rate: float | None = None
     anr_rate_28d: float | None = None
+    impressions: float | None = None
+    page_views: float | None = None
     store_id: str = ""
     prev_installs: float = 0.0
     hidden: bool = False
@@ -362,6 +367,14 @@ def _daily_series(
     return [by_date.get((start + timedelta(days=i)).isoformat(), 0.0) for i in range(days)]
 
 
+def _has_analytics(conn: sqlite3.Connection, app_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM daily_metrics WHERE source = ? AND app_id = ? LIMIT 1",
+        (apple_analytics.SOURCE, app_id),
+    ).fetchone()
+    return row is not None
+
+
 def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: date) -> float | None:
     row = conn.execute(
         "SELECT value FROM daily_metrics WHERE source = ? AND metric = ? AND app_id = ? "
@@ -413,6 +426,17 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             row.crash_rate_28d = _latest_vitals(conn, app_id, "crash_rate_28d", as_of)
             row.anr_rate = _latest_vitals(conn, app_id, "anr_rate", as_of)
             row.anr_rate_28d = _latest_vitals(conn, app_id, "anr_rate_28d", as_of)
+        elif platform == "ios" and _has_analytics(conn, app_id):
+            # A missing value must not read as a real 0 (docs/SPEC.md's own principle for
+            # vitals, applied here too) — only populated once this app has ever had a row,
+            # not just defaulted to 0 the way an app with a real but genuinely zero week
+            # would otherwise look identical.
+            row.impressions = _window_total(
+                conn, apple_analytics.SOURCE, "impressions", window, all_only=True, app_id=app_id
+            )
+            row.page_views = _window_total(
+                conn, apple_analytics.SOURCE, "page_views", window, all_only=True, app_id=app_id
+            )
         rows.append(row)
     _disambiguate(rows)
     rows.sort(key=lambda r: (-r.installs, r.name))
@@ -466,6 +490,8 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
                 crash_rate_28d=android.crash_rate_28d,
                 anr_rate=android.anr_rate,
                 anr_rate_28d=android.anr_rate_28d,
+                impressions=ios.impressions,
+                page_views=ios.page_views,
                 store_id=f"{ios.store_id} + {android.store_id}",
                 prev_installs=ios.prev_installs + android.prev_installs,
                 pair_key=ios.pair_key,
@@ -527,7 +553,14 @@ def _configured_sources(conn: sqlite3.Connection, cfg: config.Config) -> list[st
         # products, and an account with none may get an ambiguous 404 rather than a
         # clean empty report, so showing these unconditionally risked permanent
         # false "not_ready" noise for developers with no subscriptions at all.
-        for source in (apple_subscriptions.SOURCE, apple_subscription_events.SOURCE):
+        # apple_analytics joins them for a related reason: a freshly-created report
+        # request needs time before Apple produces its first instance, so showing it
+        # before anything has ever been logged would read as permanently not_ready.
+        for source in (
+            apple_subscriptions.SOURCE,
+            apple_subscription_events.SOURCE,
+            apple_analytics.SOURCE,
+        ):
             if _seen(conn, source):
                 sources.append(source)
     if cfg.google is not None:
@@ -760,6 +793,10 @@ def _render_text(ctx: _Context) -> str:
             lines.append(
                 f"  {row.name} ({platform_label}): {_installs_text(row.installs)}, {proceeds_text}"
             )
+            if row.impressions is not None and row.page_views is not None:
+                lines.append(
+                    f"    {row.impressions:.0f} impressions, {row.page_views:.0f} page views"
+                )
         if ctx.quiet_apps:
             lines.append(f"  {_quiet_apps_text(ctx.quiet_apps)}")
 
@@ -797,6 +834,15 @@ def _render_html(ctx: _Context) -> str:
                 f"crash {_pct(row.crash_rate)} daily, {_pct(row.crash_rate_28d)} 28d "
                 f"&middot; anr {_pct(row.anr_rate)} daily, {_pct(row.anr_rate_28d)} 28d</div>"
             )
+        analytics_text = ""
+        # (Android-only rows carry no analytics; a paired row carries its iOS member's —
+        # so a paired row can show vitals and analytics together, not just one or the
+        # other.)
+        if row.impressions is not None and row.page_views is not None:
+            analytics_text = (
+                '<div style="color:#666;font-size:12px;">'
+                f"{row.impressions:.0f} impressions, {row.page_views:.0f} page views</div>"
+            )
         rows_html.append(
             "<tr>"
             '<td style="padding:8px 12px;border-bottom:1px solid #eee;">'
@@ -805,7 +851,7 @@ def _render_html(ctx: _Context) -> str:
             '<td style="padding:8px 12px;border-bottom:1px solid #eee;">'
             f"<strong>{_html_escape(row.name)}</strong> ({platform_label})<br>"
             f"{_installs_text(row.installs)}, {_html_escape(proceeds_text)}"
-            f"{vitals_text}</td>"
+            f"{vitals_text}{analytics_text}</td>"
             "</tr>"
         )
 

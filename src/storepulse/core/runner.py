@@ -8,7 +8,7 @@ import os
 import sqlite3
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -24,6 +24,7 @@ from storepulse.core.secrets import (
     redact,
 )
 from storepulse.core.sources import (
+    apple_analytics,
     apple_sales,
     apple_subscription_events,
     apple_subscriptions,
@@ -481,6 +482,128 @@ def collect_apple_subscription_events(
             outcome = "error"
         if progress:
             progress(day, outcome)
+    return summary
+
+
+@dataclass
+class AppleAnalyticsSummary:
+    """Not RunSummary: this source's natural error label is an app (a str), not a date,
+    which RunSummary.errors (list[tuple[date, str]]) can't hold under mypy --strict."""
+
+    ok: int = 0
+    rows: int = 0
+    not_ready: list[str] = field(default_factory=list)
+    unmapped_rows: int = 0
+    errors: list[tuple[str, str]] = field(default_factory=list)  # (app store_id, message)
+
+
+def collect_apple_analytics(
+    conn: sqlite3.Connection,
+    client: AppleClient,
+    dates: Sequence[date],
+    *,
+    progress: Callable[[str, str], None] | None = None,
+) -> AppleAnalyticsSummary:
+    """Per-app (docs/SPEC.md: analytics report requests are created per app, unlike this
+    file's other three account-wide Apple sources): ensure the ONGOING report request
+    exists, find the Discovery and Engagement report, list its DAILY instances, and
+    download+parse+map whichever instances fall within ``dates`` for that app in one
+    write. One app's failure never stops another's (mirrors collect_play_installs's
+    per-app error isolation).
+
+    If no instance matches ``dates`` yet (a freshly-created request, or a transient gap),
+    nothing is written at all — never an empty replace_source_range call, which would
+    wipe out a previous run's good data for a window this run simply found nothing new
+    in (the same "not_ready never deletes stored rows" principle apple_sales applies).
+
+    Unlike collect_apple_sales/collect_apple_subscriptions, an AppleAuthError here never
+    stops the whole pass: ensure_report_request adopts an existing request (readable with
+    Sales and Reports) before ever attempting to create one (which needs App Manager or
+    Admin), so one app's 403 on creation says nothing about whether another app already
+    has a request to adopt. Every app gets its own attempt and its own error.
+    """
+    summary = AppleAnalyticsSummary()
+    wanted = set(dates)
+    window_start, window_end = min(dates).isoformat(), max(dates).isoformat()
+    for store_id, app_id in sorted(db.apps_for(conn, "ios").items()):
+        started = db.utc_now()
+        try:
+            request_id = apple_analytics.ensure_report_request(client, conn, store_id)
+            report_id = apple_analytics.find_discovery_engagement_report(client, conn, request_id)
+            instances = (
+                []
+                if report_id is None
+                else [
+                    i
+                    for i in apple_analytics.list_instances(client, report_id)
+                    if i.processing_date in wanted
+                ]
+            )
+            if not instances:
+                summary.not_ready.append(store_id)
+                db.log_ingest(
+                    conn,
+                    source=apple_analytics.SOURCE,
+                    report_date=window_end,
+                    started_at=started,
+                    status="not_ready",
+                    app_id=app_id,
+                )
+                if progress:
+                    progress(store_id, "not ready yet")
+                continue
+            app_rows: list[db.MetricRow] = []
+            app_unmapped = 0
+            for instance in instances:
+                segments = apple_analytics.fetch_segments(client, instance.id)
+                rows = [
+                    row
+                    for segment in segments
+                    for row in apple_analytics.parse_segment(apple_sales.decode_report(segment))
+                ]
+                mapped = apple_analytics.map_rows(conn, instance.processing_date, rows)
+                app_rows.extend(mapped.rows)
+                app_unmapped += mapped.unmapped_rows
+            written = db.replace_source_range(
+                conn, apple_analytics.SOURCE, window_start, window_end, app_rows, app_ids=[app_id]
+            )
+        except Exception as exc:
+            message = redact(f"{type(exc).__name__}: {exc}")
+            log.info("%s %s failed: %s", apple_analytics.SOURCE, store_id, message)
+            summary.errors.append((store_id, message))
+            db.log_ingest(
+                conn,
+                source=apple_analytics.SOURCE,
+                report_date=window_end,
+                started_at=started,
+                status="error",
+                note=message,
+                app_id=app_id,
+            )
+            if progress:
+                progress(store_id, "error")
+            continue
+        summary.ok += 1
+        summary.rows += written
+        summary.unmapped_rows += app_unmapped
+        if app_unmapped:
+            log.warning(
+                "%s %s: %d rows matched no known app",
+                apple_analytics.SOURCE,
+                store_id,
+                app_unmapped,
+            )
+        db.log_ingest(
+            conn,
+            source=apple_analytics.SOURCE,
+            report_date=window_end,
+            started_at=started,
+            status="ok",
+            rows=written,
+            app_id=app_id,
+        )
+        if progress:
+            progress(store_id, f"ok, {written} rows")
     return summary
 
 
@@ -1146,6 +1269,36 @@ def _run_apple_subscription_events(
     return None
 
 
+def _run_apple_analytics(
+    conn: sqlite3.Connection,
+    cfg: config.Config,
+    client: AppleClient,
+    days: int,
+    today: date,
+    progress: Callable[[str, str], None],
+    sleep: Callable[[float], None] | None = None,
+) -> str | None:
+    """Per-app internally (collect_apple_analytics), but this wrapper's own signature is
+    identical to its account-wide siblings, since run_all() only needs a uniform
+    (conn, cfg, client, days, today, progress, sleep) -> str | None call regardless of what
+    happens inside. ``sleep`` is accepted but unused: AppleClient already retries/backs off
+    internally, and this source has no per-date loop of its own to pace."""
+    assert cfg.apple is not None
+    yesterday = today - timedelta(days=1)
+    dates = [yesterday - timedelta(days=i) for i in reversed(range(days))]
+    try:
+        summary = collect_apple_analytics(conn, client, dates, progress=progress)
+    except Exception as exc:  # one failing source never blocks the others or the digest
+        message = redact(f"{type(exc).__name__}: {exc}")
+        log.error("apple_analytics failed: %s", message)
+        return f"apple_analytics: {message}"
+    if summary.errors:
+        return f"apple_analytics: {len(summary.errors)} app(s) failed: " + "; ".join(
+            group_errors(summary.errors)
+        )
+    return None
+
+
 def _run_play_source(
     label: str,
     collect: Callable[..., PlaySummary],
@@ -1219,6 +1372,7 @@ def run_all(
                 _run_apple,
                 _run_apple_subscriptions,
                 _run_apple_subscription_events,
+                _run_apple_analytics,  # per-app internally; the wrapper's own shape is uniform
             ):
                 error = run_source(conn, cfg, apple_client, days, today, report, sleep)
                 if error:
