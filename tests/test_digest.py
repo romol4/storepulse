@@ -198,6 +198,63 @@ def test_only_configured_platform_shown_in_breakdown(conn: sqlite3.Connection, i
     assert "Android" not in result.text.splitlines()[1]
 
 
+# -- lifetime installs ------------------------------------------------------------------------
+
+
+def test_lifetime_installs_spans_more_than_the_weekly_window(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """21 days of data: the weekly line only sees the most recent 7, but the lifetime
+    line sums all 21 -- the whole point of the feature."""
+    for i in range(21):
+        d = (AS_OF - timedelta(days=i)).isoformat()
+        _apple_day(conn, d, ios_id, installs=10.0, proceeds=0)
+        _android_installs_day(conn, d, android_id, installs=4.0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+    _log(conn, "play_vitals", AS_OF.isoformat())
+
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert "Installs  98 (+0% wk)   iOS 70 · Android 28" in result.text
+    assert "Lifetime  294   iOS 210 · Android 84" in result.text
+    assert "Lifetime installs: 294" in result.html
+    assert "iOS 210" in result.html and "Android 84" in result.html
+
+
+def test_lifetime_installs_excludes_redownloads(conn: sqlite3.Connection, ios_id: int) -> None:
+    """apple_sales' redownloads metric is tracked separately (docs/SPEC.md) and must not
+    inflate the lifetime installs figure, the same way it's excluded from the weekly one."""
+    db.replace_source_day(
+        conn,
+        "apple_sales",
+        AS_OF.isoformat(),
+        [
+            db.MetricRow(AS_OF.isoformat(), ios_id, "US", "installs", "", 10.0),
+            db.MetricRow(AS_OF.isoformat(), ios_id, "US", "redownloads", "", 500.0),
+        ],
+    )
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "Lifetime  10   iOS 10" in result.text
+
+
+def test_lifetime_installs_shows_dash_for_unavailable_platform(conn: sqlite3.Connection) -> None:
+    _email_like_account(conn)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    lifetime_line = next(line for line in result.text.splitlines() if line.startswith("Lifetime"))
+    assert lifetime_line == "Lifetime  29   iOS 29 · Android —"
+
+
+def test_lifetime_installs_only_configured_platform_shown(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=12.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    lifetime_line = next(line for line in result.text.splitlines() if line.startswith("Lifetime"))
+    assert lifetime_line == "Lifetime  12   iOS 12"
+
+
 # -- proceeds / currency ---------------------------------------------------------------------
 
 
@@ -751,6 +808,7 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
     assert result.text == (
         "Storepulse · Sat Sep 26\n"
         "Installs  126 (+0% wk)   iOS 70 · Android 56\n"
+        "Lifetime  252   iOS 140 · Android 112\n"
         "Proceeds  $125.00 (+19% wk)\n"
         "Android sales (gross, provisional, until the month's earnings arrive)  $25.00\n"
         "Top app   deskFT 70 installs\n"
