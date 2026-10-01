@@ -110,6 +110,7 @@ class Jobs:
                 cfg,
                 apple_client=clients.apple,
                 google_client=clients.google,
+                revenuecat_client=clients.revenuecat,
                 smtp_password=clients.smtp_password,
                 send_email=cfg.email is not None,
                 today=self._today(),

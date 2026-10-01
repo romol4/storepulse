@@ -21,6 +21,7 @@ from storepulse.core import checks, config, db, discovery, mailer, runner
 from storepulse.core.secrets import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    REVENUECAT_KEY_SECRET,
     SMTP_PASSWORD_SECRET,
     DbEncryptedStore,
     register_secret,
@@ -29,6 +30,7 @@ from storepulse.core.sources import apple_sales
 from storepulse.core.sources.apple_client import AppleClient
 from storepulse.core.sources.google_auth import GoogleCredentialError, load_service_account
 from storepulse.core.sources.google_client import GoogleClient, parse_bucket_uri
+from storepulse.core.sources.revenuecat import RevenueCatClient
 from storepulse.web import security
 from storepulse.web.common import (
     BASE_URL_KEY,
@@ -58,6 +60,8 @@ SAVED = {
         "service accounts can take 24-48 hours. Use Test connection to check later."
     ),
     "google-removed": "Google Play removed.",
+    "revenuecat": "RevenueCat settings saved.",
+    "revenuecat-removed": "RevenueCat removed.",
     "email": "Email saved; a test email was sent.",
     "email-removed": "Email removed.",
     "preferences": "Preferences saved.",
@@ -114,6 +118,7 @@ def _page(
             "credentials": {
                 "apple": _credential_info(store, APPLE_P8_SECRET),
                 "google": _credential_info(store, GOOGLE_SA_SECRET),
+                "revenuecat": _credential_info(store, REVENUECAT_KEY_SECRET),
                 "email": _credential_info(store, SMTP_PASSWORD_SECRET),
             },
             "timezone": settings.get(TIMEZONE_KEY) or DEFAULT_TIMEZONE,
@@ -290,6 +295,53 @@ async def save_google(
     return RedirectResponse(f"/settings?saved={saved}#google", status_code=303)
 
 
+# -- RevenueCat -----------------------------------------------------------------------------------
+
+
+@router.post("/settings/revenuecat")
+def save_revenuecat(
+    request: Request,
+    csrf: FormStr = "",
+    project_id: FormStr = "",
+    api_key: FormStr = "",
+    admin_password: FormStr = "",
+) -> Response:
+    state = hosted(request)
+    with state.database() as conn:
+        viewer = current_viewer(request, conn)
+        require_csrf(viewer, csrf)
+        store = state.store(conn)
+        try:
+            existing = store.get(REVENUECAT_KEY_SECRET)
+            if api_key and existing is not None:
+                _reauth(viewer, admin_password, "revenuecat")
+            key = api_key or existing
+            if not key:
+                raise FormProblem("revenuecat", "Enter the RevenueCat secret API key.")
+            if not project_id.strip():
+                raise FormProblem("revenuecat", "Enter the RevenueCat project ID.")
+            with RevenueCatClient(
+                key, project_id.strip(), transport=state.deps.transport, sleep=state.deps.sleep
+            ) as client:
+                result = checks.check_revenuecat(client)
+            if result.failed:
+                return _page(
+                    request,
+                    conn,
+                    viewer,
+                    problem=FormProblem("revenuecat", result.failed[0].text),
+                    checks_shown=result.checks,
+                    status_code=400,
+                )
+        except FormProblem as exc:
+            return _handle(request, viewer, conn, exc)
+        store.set(REVENUECAT_KEY_SECRET, key)
+        cfg = config.load_hosted(conn)
+        cfg.revenuecat = config.RevenueCatConfig(project_id.strip())
+        config.save_hosted(conn, cfg)
+    return RedirectResponse("/settings?saved=revenuecat#revenuecat", status_code=303)
+
+
 # -- email ----------------------------------------------------------------------------------------
 
 
@@ -358,6 +410,7 @@ def save_email(
 _REMOVABLE = {
     "apple": (APPLE_P8_SECRET, "apple"),
     "google": (GOOGLE_SA_SECRET, "google"),
+    "revenuecat": (REVENUECAT_KEY_SECRET, "revenuecat"),
     "email": (SMTP_PASSWORD_SECRET, "email"),
 }
 
@@ -398,7 +451,7 @@ def test_credential(request: Request, section: str, csrf: FormStr = "") -> Respo
             store, cfg, transport=state.deps.transport, sleep=state.deps.sleep
         )
         try:
-            prefix = {"apple": "apple", "google": "google"}.get(section)
+            prefix = {"apple": "apple", "google": "google", "revenuecat": "revenuecat"}.get(section)
             shown += [
                 checks.Check("fail", e) for e in clients.errors if prefix and e.startswith(prefix)
             ]
@@ -411,6 +464,12 @@ def test_credential(request: Request, section: str, csrf: FormStr = "") -> Respo
                     clients.google, parse_bucket_uri(cfg.google.bucket_uri)
                 )
                 shown += result.checks
+            elif (
+                section == "revenuecat"
+                and clients.revenuecat is not None
+                and cfg.revenuecat is not None
+            ):
+                shown += checks.check_revenuecat(clients.revenuecat).checks
             elif section == "email" and cfg.email is not None and clients.smtp_password:
                 try:
                     mailer.check(cfg.email, clients.smtp_password, factory=state.deps.smtp_factory)

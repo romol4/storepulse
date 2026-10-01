@@ -70,6 +70,22 @@
   {{ card_actions("google", credentials.google) }}
 </section>
 
+<section class="card" id="revenuecat">
+  <h2>RevenueCat</h2>
+  <p class="muted">A read-only Secret v2 API key and project ID (README, "RevenueCat"). Not shown in the digest or dashboard yet — only its collection status appears on the Sources page.</p>
+  {{ problem_for("revenuecat") }}
+  {{ saved_line(credentials.revenuecat) }}
+  <form method="post" action="/settings/revenuecat">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Project ID <input name="project_id" value="{{ cfg.revenuecat.project_id if cfg.revenuecat else '' }}" required></label>
+    <label>Secret API key {% if credentials.revenuecat %}<span class="muted">(leave empty to keep the saved key)</span>{% endif %}
+      <input name="api_key" type="password" autocomplete="off" {% if not credentials.revenuecat %}required{% endif %}></label>
+    {{ reauth(credentials.revenuecat) }}
+    <button type="submit">Check and save</button>
+  </form>
+  {{ card_actions("revenuecat", credentials.revenuecat) }}
+</section>
+
 <section class="card" id="email">
   <h2>Email</h2>
   <p class="muted">The daily digest goes through your own SMTP server; a test email is sent before saving (README, "SMTP setup").</p>
