@@ -39,6 +39,12 @@ METRICS: frozenset[str] = frozenset(
 
 INGEST_STATUSES: frozenset[str] = frozenset({"ok", "not_ready", "error"})
 
+# The snapshots table's own vocabulary (docs/SPEC.md, RevenueCat/Phase 6b) — point-in-time
+# values, never a daily_metrics metric, so it is validated separately from METRICS above.
+SNAPSHOT_METRICS: frozenset[str] = frozenset(
+    {"mrr", "active_subscriptions", "active_trials", "revenue"}
+)
+
 _MIGRATION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -328,6 +334,43 @@ def log_ingest(
         "error, app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (source, report_date, started_at, utc_now(), status, rows, note, app_id),
     )
+
+
+@dataclass(frozen=True)
+class SnapshotRow:
+    taken_at: str
+    app_id: int | None  # NULL for a project-wide snapshot (RevenueCat has no per-app split)
+    metric: str
+    currency: str
+    value: float
+
+
+def record_snapshot(conn: sqlite3.Connection, rows: Iterable[SnapshotRow]) -> int:
+    """Insert one run's point-in-time values into ``snapshots`` (docs/SPEC.md, RevenueCat).
+
+    Each (``taken_at``, ``app_id``) pair in the batch is deleted and re-inserted in one
+    transaction, the same "delete, then insert" shape ``replace_source_day`` uses for
+    ``daily_metrics`` -- not an ``ON CONFLICT`` upsert: SQLite (standard SQL) never treats
+    two NULLs as equal for a UNIQUE/PRIMARY KEY match, so ``ON CONFLICT`` would silently
+    never fire for a project-wide snapshot, whose ``app_id`` is always NULL. Delete uses
+    ``IS``, not ``=``, for the same reason. Returns rows written.
+    """
+    batch = list(rows)
+    for row in batch:
+        if row.metric not in SNAPSHOT_METRICS:
+            raise UnknownMetricError(f"unknown snapshot metric {row.metric!r}")
+    pairs = {(r.taken_at, r.app_id) for r in batch}
+    with transaction(conn):
+        for taken_at, app_id in pairs:
+            conn.execute(
+                "DELETE FROM snapshots WHERE taken_at = ? AND app_id IS ?", (taken_at, app_id)
+            )
+        conn.executemany(
+            "INSERT INTO snapshots (taken_at, app_id, metric, currency, value) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(r.taken_at, r.app_id, r.metric, r.currency, r.value) for r in batch],
+        )
+    return len(batch)
 
 
 # -- hosted mode (docs/SPEC.md, Storage → Hosted-mode additions) ---------------------------

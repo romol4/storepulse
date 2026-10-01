@@ -70,6 +70,11 @@ class GoogleConfig:
 
 
 @dataclass
+class RevenueCatConfig:
+    project_id: str
+
+
+@dataclass
 class EmailConfig:
     host: str
     port: int
@@ -103,13 +108,14 @@ class Config:
     secret_store: str = ""
     apple: AppleConfig | None = None
     google: GoogleConfig | None = None
+    revenuecat: RevenueCatConfig | None = None
     email: EmailConfig | None = None
     digest: DigestConfig = field(default_factory=DigestConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     extra: dict[str, object] = field(default_factory=dict)
 
 
-CONFIG_SECTIONS = ("apple", "google", "email", "digest", "schedule")
+CONFIG_SECTIONS = ("apple", "google", "revenuecat", "email", "digest", "schedule")
 MODE_ENV = "STOREPULSE_MODE"
 
 
@@ -200,6 +206,12 @@ def from_mapping(raw: dict[str, Any], path: str = "settings") -> Config:
             )
         except KeyError as exc:
             raise ConfigError(f"{path}: [google] is missing {exc.args[0]!r}") from None
+    revenuecat = raw.pop("revenuecat", None)
+    if isinstance(revenuecat, dict):
+        try:
+            cfg.revenuecat = RevenueCatConfig(project_id=str(revenuecat["project_id"]))
+        except KeyError as exc:
+            raise ConfigError(f"{path}: [revenuecat] is missing {exc.args[0]!r}") from None
     email = raw.pop("email", None)
     if isinstance(email, dict):
         try:
@@ -276,6 +288,12 @@ def dumps(cfg: Config) -> str:
             f"bucket_uri = {_toml_str(cfg.google.bucket_uri)}",
             f"service_account_email = {_toml_str(cfg.google.service_account_email)}",
         ]
+    if cfg.revenuecat is not None:
+        lines += [
+            "",
+            "[revenuecat]",
+            f"project_id = {_toml_str(cfg.revenuecat.project_id)}",
+        ]
     if cfg.email is not None:
         lines += [
             "",
@@ -319,6 +337,8 @@ def to_mapping(cfg: Config) -> dict[str, dict[str, Any]]:
         sections["apple"] = dataclasses.asdict(cfg.apple)
     if cfg.google is not None:
         sections["google"] = dataclasses.asdict(cfg.google)
+    if cfg.revenuecat is not None:
+        sections["revenuecat"] = dataclasses.asdict(cfg.revenuecat)
     if cfg.email is not None:
         sections["email"] = dataclasses.asdict(cfg.email)
     sections["digest"] = dataclasses.asdict(cfg.digest)

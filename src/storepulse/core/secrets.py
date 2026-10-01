@@ -40,6 +40,7 @@ SECRETS_FILENAME = "secrets.enc"
 APPLE_P8_SECRET = "apple_p8"  # noqa: S105 (secret name, not a value)
 GOOGLE_SA_SECRET = "google_sa"  # noqa: S105 (secret name, not a value)
 SMTP_PASSWORD_SECRET = "smtp_password"  # noqa: S105 (secret name, not a value)
+REVENUECAT_KEY_SECRET = "revenuecat_key"  # noqa: S105 (secret name, not a value)
 
 FILE_FORMAT = "storepulse-secrets"
 FILE_VERSION = 1
