@@ -456,6 +456,69 @@ def test_analytics_shown_on_data_line_once_seen(conn: sqlite3.Connection, ios_id
     assert "apple_analytics ok" in result.text
 
 
+# -- RevenueCat (docs/SPEC.md, Phase 6b) ----------------------------------------------------
+
+REVENUECAT_CFG = config.RevenueCatConfig(project_id="proj_1")
+
+
+def test_revenuecat_not_shown_when_unconfigured(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "revenuecat" not in result.text
+
+
+def test_revenuecat_not_ready_before_its_first_run(conn: sqlite3.Connection, ios_id: int) -> None:
+    """Unlike apple_subscriptions/apple_analytics, revenuecat joins the Data line as soon
+    as it's configured, not only once seen: setup validates the key live, so there's no
+    'may legitimately never produce data' case to guard against, and a key revoked before
+    its very first scheduled run must still be visible rather than silently absent."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None, revenuecat=REVENUECAT_CFG), today=TODAY)
+    assert "revenuecat not_ready" in result.text
+
+
+def test_revenuecat_ok_when_logged_today(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "revenuecat", TODAY.isoformat())  # report_date is always *today* for this source
+    result = digest.build_digest(conn, _cfg(google=None, revenuecat=REVENUECAT_CFG), today=TODAY)
+    assert "revenuecat ok (Sep 27)" in result.text  # TODAY != as_of (AS_OF), so the date shows
+
+
+def test_revenuecat_error_surfaces_even_with_a_recent_ok(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    """A revoked key must show up the moment it fails, not wait out the overdue window —
+    today's error is reported even though yesterday's run still succeeded."""
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _log(conn, "revenuecat", (TODAY - timedelta(days=1)).isoformat())
+    _log(conn, "revenuecat", TODAY.isoformat(), status="error")
+    result = digest.build_digest(conn, _cfg(google=None, revenuecat=REVENUECAT_CFG), today=TODAY)
+    assert "revenuecat error" in result.text
+
+
+def test_revenuecat_overdue_after_stale_days(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    stale_cutoff = TODAY - timedelta(days=config.DEFAULT_STALE_DAYS + 1)
+    _log(conn, "revenuecat", stale_cutoff.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None, revenuecat=REVENUECAT_CFG), today=TODAY)
+    assert "revenuecat not_ready" in result.text
+
+
+def test_revenuecat_not_overdue_within_stale_days(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    recent = TODAY - timedelta(days=config.DEFAULT_STALE_DAYS - 1)
+    _log(conn, "revenuecat", recent.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None, revenuecat=REVENUECAT_CFG), today=TODAY)
+    assert "revenuecat not_ready" not in result.text
+    assert "revenuecat ok" in result.text
+
+
 # -- overdue cadence rules -----------------------------------------------------------------
 
 

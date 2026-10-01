@@ -438,12 +438,68 @@ def standard_objects() -> dict[str, bytes]:
     }
 
 
-def router(apple: FakeApple | None = None, google: FakeGoogle | None = None) -> httpx.MockTransport:
-    """One transport serving both fakes, dispatched by host."""
+# -- RevenueCat ------------------------------------------------------------------------------
+
+REVENUECAT_PROJECT = "proj_test123"
+
+
+def revenuecat_overview(
+    *,
+    mrr: float = 1000.0,
+    active_subscriptions: int = 50,
+    active_trials: int = 5,
+    revenue: float = 2500.0,
+    currency: str | None = None,
+    extra: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    items: list[dict[str, object]] = [
+        {"id": "mrr", "value": mrr, **({"currency": currency} if currency else {})},
+        {"id": "active_subscriptions", "value": active_subscriptions},
+        {"id": "active_trials", "value": active_trials},
+        {"id": "revenue", "value": revenue, **({"currency": currency} if currency else {})},
+        *(extra or []),
+    ]
+    return {"object": "list", "items": items}
+
+
+@dataclass
+class FakeRevenueCat:
+    """Mock RevenueCat API v2. ``overview`` keyed by project id; default is a response."""
+
+    overview: dict[str, httpx.Response] = field(default_factory=dict)
+    default_overview: dict[str, object] | None = None
+    requests: list[httpx.Request] = field(default_factory=list)
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        prefix = "/v2/projects/"
+        if request.url.path.startswith(prefix) and request.url.path.endswith("/metrics/overview"):
+            project_id = request.url.path[len(prefix) : -len("/metrics/overview")]
+            response = self.overview.get(project_id)
+            if response is not None:
+                return response
+            if self.default_overview is not None:
+                return httpx.Response(200, json=self.default_overview)
+            return httpx.Response(404, json={"message": "project not found"})
+        return httpx.Response(404)
+
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handler)
+
+
+def router(
+    apple: FakeApple | None = None,
+    google: FakeGoogle | None = None,
+    revenuecat: FakeRevenueCat | None = None,
+) -> httpx.MockTransport:
+    """One transport serving every fake, dispatched by host."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.host == "api.appstoreconnect.apple.com":
             return apple.handler(request) if apple else httpx.Response(599)
+        if request.url.host == "api.revenuecat.com":
+            return revenuecat.handler(request) if revenuecat else httpx.Response(599)
         return google.handler(request) if google else httpx.Response(599)
 
     return httpx.MockTransport(handle)

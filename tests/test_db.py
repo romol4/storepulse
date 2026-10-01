@@ -102,3 +102,33 @@ def test_log_ingest_validates_status(conn: sqlite3.Connection) -> None:
         db.log_ingest(
             conn, source="s", report_date="2026-09-20", started_at=db.utc_now(), status="running"
         )
+
+
+# -- snapshots (docs/SPEC.md, RevenueCat / Phase 6b) ----------------------------------------
+
+
+def test_record_snapshot_writes_rows(conn: sqlite3.Connection) -> None:
+    rows = [
+        db.SnapshotRow("2026-09-20T10:00:00+00:00", None, "mrr", "USD", 1234.5),
+        db.SnapshotRow("2026-09-20T10:00:00+00:00", None, "active_subscriptions", "", 42),
+    ]
+    assert db.record_snapshot(conn, rows) == 2
+    stored = conn.execute("SELECT app_id, metric, currency, value FROM snapshots").fetchall()
+    assert {(r["app_id"], r["metric"], r["currency"], r["value"]) for r in stored} == {
+        (None, "mrr", "USD", 1234.5),
+        (None, "active_subscriptions", "", 42.0),
+    }
+
+
+def test_record_snapshot_unknown_metric_rejected(conn: sqlite3.Connection) -> None:
+    with pytest.raises(db.UnknownMetricError):
+        db.record_snapshot(conn, [db.SnapshotRow("2026-09-20T10:00:00+00:00", None, "mau", "", 1)])
+    assert conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 0
+
+
+def test_record_snapshot_same_moment_upserts_not_duplicates(conn: sqlite3.Connection) -> None:
+    taken_at = "2026-09-20T10:00:00+00:00"
+    db.record_snapshot(conn, [db.SnapshotRow(taken_at, None, "mrr", "USD", 100.0)])
+    db.record_snapshot(conn, [db.SnapshotRow(taken_at, None, "mrr", "USD", 150.0)])
+    rows = conn.execute("SELECT value FROM snapshots").fetchall()
+    assert [r["value"] for r in rows] == [150.0]

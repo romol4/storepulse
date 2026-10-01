@@ -14,11 +14,14 @@ from conftest import (
     BUCKET,
     FT_APPS,
     PKG,
+    REVENUECAT_PROJECT,
     TODAY,
     FakeApple,
     FakeGoogle,
+    FakeRevenueCat,
     apple_error,
     fixture_bytes,
+    revenuecat_overview,
     standard_objects,
     subscription_events_fixture_bytes,
     subscriptions_fixture_bytes,
@@ -27,12 +30,17 @@ from storepulse.core import config, db, runner
 from storepulse.core.sources.apple_client import AppleClient
 from storepulse.core.sources.google_auth import load_service_account
 from storepulse.core.sources.google_client import GoogleClient
+from storepulse.core.sources.revenuecat import RevenueCatClient
 
 YESTERDAY = TODAY - timedelta(days=1)
 
 
 def _cfg(
-    *, apple: bool = True, google: bool = True, email: config.EmailConfig | None = None
+    *,
+    apple: bool = True,
+    google: bool = True,
+    revenuecat: bool = False,
+    email: config.EmailConfig | None = None,
 ) -> config.Config:
     return config.Config(
         apple=config.AppleConfig(issuer_id="i", key_id="k", vendor_number="85000000")
@@ -43,8 +51,15 @@ def _cfg(
         )
         if google
         else None,
+        revenuecat=config.RevenueCatConfig(project_id=REVENUECAT_PROJECT) if revenuecat else None,
         email=email,
         schedule=config.ScheduleConfig(days=1),
+    )
+
+
+def _revenuecat_client(fake: FakeRevenueCat) -> RevenueCatClient:
+    return RevenueCatClient(
+        "sk_test", REVENUECAT_PROJECT, transport=fake.transport, sleep=lambda _: None
     )
 
 
@@ -260,6 +275,71 @@ def test_failing_apple_analytics_does_not_block_other_apple_sources(
         ).fetchone()[0]
         == 0
     )
+
+
+def test_revenuecat_collects_alongside_apple(conn: sqlite3.Connection, p8_pem: str) -> None:
+    apple = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
+    revenuecat = FakeRevenueCat(default_overview=revenuecat_overview())
+
+    result = runner.run_all(
+        conn,
+        _cfg(google=False, revenuecat=True, email=None),
+        apple_client=_apple_client(apple, p8_pem),
+        revenuecat_client=_revenuecat_client(revenuecat),
+        today=TODAY,
+        send_email=False,
+    )
+
+    assert result.ok
+    assert (
+        conn.execute("SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_sales'").fetchone()[
+            0
+        ]
+        > 0
+    )
+    rows = conn.execute("SELECT COUNT(*) AS n FROM snapshots").fetchone()["n"]
+    assert rows == 4  # mrr, active_subscriptions, active_trials, revenue
+    ingest = conn.execute("SELECT status FROM ingest_log WHERE source = 'revenuecat'").fetchone()
+    assert ingest["status"] == "ok"
+
+
+def test_failing_revenuecat_does_not_block_apple(conn: sqlite3.Connection, p8_pem: str) -> None:
+    apple = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
+    broken = FakeRevenueCat()  # no overview registered: fetch_overview() 404s
+
+    result = runner.run_all(
+        conn,
+        _cfg(google=False, revenuecat=True, email=None),
+        apple_client=_apple_client(apple, p8_pem),
+        revenuecat_client=_revenuecat_client(broken),
+        today=TODAY,
+        send_email=False,
+    )
+
+    assert not result.ok
+    assert any(e.startswith("revenuecat:") for e in result.errors)
+    assert not any(e.startswith("apple_sales:") for e in result.errors)
+    assert (
+        conn.execute("SELECT COUNT(*) FROM daily_metrics WHERE source = 'apple_sales'").fetchone()[
+            0
+        ]
+        > 0
+    )
+    assert conn.execute("SELECT COUNT(*) AS n FROM snapshots").fetchone()["n"] == 0
+
+
+def test_revenuecat_not_collected_when_client_is_none(conn: sqlite3.Connection) -> None:
+    """Configured but the client failed to build (e.g. a missing secret, reported in
+    clients.errors by clients_from_store): run_all must skip it, not crash."""
+    result = runner.run_all(
+        conn,
+        _cfg(apple=False, google=False, revenuecat=True, email=None),
+        revenuecat_client=None,
+        today=TODAY,
+        send_email=False,
+    )
+    assert result.ok
+    assert conn.execute("SELECT COUNT(*) FROM ingest_log").fetchone()[0] == 0
 
 
 def test_discovery_refresh_registers_new_apps(conn: sqlite3.Connection, sa_json: str) -> None:

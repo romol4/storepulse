@@ -105,6 +105,22 @@ def test_digest_rates_must_be_a_table(tmp_path: Path) -> None:
         config.load(path)
 
 
+def test_revenuecat_roundtrip(tmp_path: Path) -> None:
+    cfg = config.Config(revenuecat=config.RevenueCatConfig(project_id="proj_abc123"))
+    path = tmp_path / "config.toml"
+    config.save(cfg, path)
+    loaded = config.load(path)
+    assert loaded.revenuecat == cfg.revenuecat
+    assert loaded.apple is None and loaded.google is None
+
+
+def test_revenuecat_requires_project_id(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[revenuecat]\n")
+    with pytest.raises(config.ConfigError, match=r"\[revenuecat\]"):
+        config.load(path)
+
+
 def test_currency_codes_needing_quotes_roundtrip(tmp_path: Path) -> None:
     # TOML bare keys can't start with a digit or contain some symbols; quoting in the
     # writer means any currency code (however unusual) round-trips safely.

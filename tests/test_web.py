@@ -21,10 +21,13 @@ from fastapi.testclient import TestClient
 from conftest import (
     BUCKET,
     FT_APPS,
+    REVENUECAT_PROJECT,
     TODAY,
     FakeApple,
     FakeGoogle,
+    FakeRevenueCat,
     fixture_bytes,
+    revenuecat_overview,
     router,
     standard_objects,
 )
@@ -77,6 +80,7 @@ class Site:
     log: io.StringIO
     apple: FakeApple
     google: FakeGoogle
+    revenuecat: FakeRevenueCat
     smtp: FakeSMTP
 
     @property
@@ -96,9 +100,10 @@ class Site:
 def site() -> Iterator[Site]:
     apple = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
     google = FakeGoogle(objects=standard_objects())
+    revenuecat = FakeRevenueCat(default_overview=revenuecat_overview())
     smtp = FakeSMTP()
     deps = JobDeps(
-        transport=router(apple, google),
+        transport=router(apple, google, revenuecat),
         sleep=lambda _: None,
         smtp_factory=lambda host, port, timeout: smtp,
         today=lambda: TODAY,
@@ -107,7 +112,7 @@ def site() -> Iterator[Site]:
     log = io.StringIO()
     app = create_app(deps, start_scheduler=False, log_stream=log)
     with TestClient(app, follow_redirects=False) as client:
-        yield Site(client, log, apple, google, smtp)
+        yield Site(client, log, apple, google, revenuecat, smtp)
 
 
 def _setup_admin(site: Site) -> None:
@@ -459,6 +464,21 @@ def _save_google(site: Site, sa_json: str) -> object:
     )
 
 
+REVENUECAT_KEY = "sk_test_revenuecat_secret"
+
+
+def _save_revenuecat(site: Site, api_key: str = REVENUECAT_KEY, **extra: str) -> object:
+    return site.client.post(
+        "/settings/revenuecat",
+        data={
+            "csrf": site.csrf("/settings"),
+            "project_id": REVENUECAT_PROJECT,
+            "api_key": api_key,
+            **extra,
+        },
+    )
+
+
 def _save_email(site: Site, password: str = SMTP_PASSWORD, **extra: str) -> object:
     return site.client.post(
         "/settings/email",
@@ -529,6 +549,37 @@ def test_google_pending_permission_can_still_be_saved(site: Site, sa_json: str) 
     assert response.headers["location"].startswith("/settings?saved=google-pending")  # type: ignore[attr-defined]
 
 
+def test_revenuecat_is_checked_live_then_saved_and_never_shown(site: Site) -> None:
+    _setup_admin(site)
+    response = _save_revenuecat(site)
+    assert response.status_code == 303, getattr(response, "text", "")  # type: ignore[attr-defined]
+    page = site.client.get("/settings").text
+    assert "fingerprint <code>hmac:" in page
+    assert REVENUECAT_KEY not in page
+    conn = db.connect(config.db_path())
+    assert config.load_hosted(conn).revenuecat == config.RevenueCatConfig(REVENUECAT_PROJECT)
+
+
+def test_revenuecat_failure_saves_nothing(site: Site) -> None:
+    _setup_admin(site)
+    site.revenuecat.overview = {}
+    site.revenuecat.default_overview = None  # every project id 404s
+    response = _save_revenuecat(site)
+    assert response.status_code == 400  # type: ignore[attr-defined]
+    assert "project ID" in response.text  # type: ignore[attr-defined]
+    conn = db.connect(config.db_path())
+    assert db.secret_names(conn) == [] and config.load_hosted(conn).revenuecat is None
+
+
+def test_replacing_a_saved_revenuecat_key_needs_the_admin_password(site: Site) -> None:
+    _setup_admin(site)
+    _save_revenuecat(site)
+    again = _save_revenuecat(site)
+    assert again.status_code == 400 and "admin password" in again.text  # type: ignore[attr-defined]
+    ok = _save_revenuecat(site, admin_password=PASSWORD)
+    assert ok.status_code == 303  # type: ignore[attr-defined]
+
+
 def test_email_sends_a_test_before_saving(site: Site) -> None:
     _setup_admin(site)
     site.smtp.fail_login = True
@@ -570,6 +621,7 @@ def test_no_page_or_response_contains_a_stored_secret(
     _setup_admin(site)
     _save_apple(site, p8_pem)
     _save_google(site, sa_json)
+    _save_revenuecat(site)
     _save_email(site)
     future = site.client.app.state.hosted.jobs.run("test")  # type: ignore[attr-defined]
     future.result(timeout=60)
@@ -578,6 +630,7 @@ def test_no_page_or_response_contains_a_stored_secret(
         *(line for line in p8_pem.splitlines() if len(line) > 16 and "-----" not in line),
         *(line for line in rsa_pem.splitlines() if len(line) > 16 and "-----" not in line),
         SMTP_PASSWORD,
+        REVENUECAT_KEY,
         MASTER_KEY,
         PASSWORD,
     ]
@@ -587,7 +640,7 @@ def test_no_page_or_response_contains_a_stored_secret(
     csrf = site.csrf("/settings")
     posts = [
         site.client.post(f"/settings/{s}/test", data={"csrf": csrf})
-        for s in ("apple", "google", "email")
+        for s in ("apple", "google", "revenuecat", "email")
     ]
     # Not just the normal-page crawl: a 404 and a 405 go through different handlers
     # (FastAPI's own error paths, not our page functions) and need the same sweep.
@@ -605,7 +658,7 @@ def test_no_page_or_response_contains_a_stored_secret(
         assert not re.search(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", body), f"{response.url} leaks a JWT"
     # Nor does the database file itself.
     raw = b"".join(p.read_bytes() for p in Path(config.db_path()).parent.glob("storepulse.db*"))
-    for secret in (SMTP_PASSWORD, MASTER_KEY, *secrets[:3]):
+    for secret in (SMTP_PASSWORD, REVENUECAT_KEY, MASTER_KEY, *secrets[:3]):
         assert secret.encode() not in raw
 
 

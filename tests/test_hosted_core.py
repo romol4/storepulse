@@ -36,6 +36,7 @@ def _full_config() -> config.Config:
         secret_store="db",
         apple=config.AppleConfig("issuer", "KEYID", "85000000"),
         google=config.GoogleConfig("gs://pubsite_prod_1/", "sa@x.iam.gserviceaccount.com"),
+        revenuecat=config.RevenueCatConfig("proj_123"),
         email=config.EmailConfig("smtp.x", 587, "starttls", "u", "a@x", ["a@x", "b@x"]),
         digest=config.DigestConfig(rates={"CAD": 0.73}, display_currency="USD"),
         schedule=config.ScheduleConfig(run_time="09:15", days=10),
@@ -47,6 +48,7 @@ def test_settings_round_trip(conn: sqlite3.Connection) -> None:
     config.save_hosted(conn, cfg)
     rows = db.get_settings(conn)
     assert rows["apple.vendor_number"] == "85000000"
+    assert rows["revenuecat.project_id"] == "proj_123"
     assert rows["digest.rates"] == {"CAD": 0.73}
     assert rows["email.to_addrs"] == ["a@x", "b@x"]
     assert "secret_store" not in rows and not any(k.startswith("extra") for k in rows)
