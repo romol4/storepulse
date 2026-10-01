@@ -6,7 +6,7 @@ Play data into a local SQLite database. It works in two modes:
 - **Local:** runs on your Mac, Windows or Linux machine and sends a daily email.
 - **Hosted:** self-hosted with Docker, adding a web dashboard.
 
-> **Status: early development (v0.3 — Apple Analytics & lifetime installs).** What works
+> **Status: early development (v0.4 — Apple Analytics & lifetime installs).** What works
 > today:
 > - **Local mode:** guided setup (`storepulse init`), credential checks
 >   (`storepulse doctor`) and historical loads (`storepulse backfill`) for Apple sales,

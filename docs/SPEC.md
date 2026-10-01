@@ -407,12 +407,15 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
    - Most of the original scope landed already, incidentally: Phase 4 built the `X-Forwarded-For` trust boundary correctly from the start, and a same-day follow-up fixed TOTP replay; throttle persistence is resolved as documented in-memory, reset on restart. What's actually left: an error-page and JSON-response secret sweep (404/405/500, not just the normal-page crawl Phase 4's tests already do); Docker image digest-pinning and vulnerability scanning in CI; and a decision — fix or document as deliberate — on the SMTP "Test connection" feature reaching arbitrary hosts from an authenticated admin session, since it currently has no allowlist/denylist for loopback or private ranges.
    - Two properties are true today but only verified by code review, not by a test: no session fixation (`start_session` always mints a fresh token) and server-side session expiry (`get_session`'s `expires_at` check, independent of the cookie's own `Max-Age`). A third, chart JSON embedded via `|safe`, isn't exploitable today (`_chart_json` only ever serializes dates and floats, never an app-controlled string) but has no test stopping a future field from reintroducing exactly that risk. Backfill regression tests for these three so "true by inspection" becomes "true and pinned down."
    - *Done when:* the hosted-mode items in `SECURITY.md`'s checklist pass — including the SMTP test-connection item, which the checklist already lists but this phase's scope previously didn't name — and a second reviewer (Claude review pass) finds no open high-severity issue. Two such passes already happened during Phase 4's review; this phase's pass only needs to cover what's still open above.
-6a. **Apple analytics → v0.3** (split from Phase 6 because Apple Analytics and RevenueCat
+6a. **Apple analytics → v0.4** (split from Phase 6 because Apple Analytics and RevenueCat
    are independent data sources, each with its own config/secrets/runner/CLI/web wiring —
    splitting keeps each PR reviewable, the same reasoning behind the 5a/5b split. Originally
    6b, not this phase, was meant to claim the version bump, the same way only the phase
    completing a milestone did for 5a/5b; with 6b deferred with no plans to continue, this
-   phase and the lifetime-installs digest/dashboard addition claim v0.3 instead)
+   phase and the lifetime-installs digest/dashboard addition claim v0.4 instead. v0.3
+   itself was never tagged: a v0.3.0 tag was pushed before `pyproject.toml`'s version bump
+   had landed, so the release workflow's tag-vs-version check failed before anything built
+   or published -- the version number is simply skipped, not released then withdrawn)
    - One-time `analyticsReportRequests` setup per app (`accessType: ONGOING`, adopting an
      already-existing request rather than creating a duplicate), daily `DAILY`-granularity
      instance listing and segment downloads for the App Store Discovery and Engagement
@@ -437,7 +440,7 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
      convenient time. RevenueCat is optional; the store reports already supply revenue
      (Sales and Earnings) and subscription state (Phase 3b); and LogicFT's own apps have no
      confirmed subscription products to dogfood against. MRR is the one metric the store
-     reports can't give directly, and nothing in the digest or dashboard displays it. v0.3
+     reports can't give directly, and nothing in the digest or dashboard displays it. v0.4
      ships without this phase — Apple Analytics (6a) and the lifetime-installs addition
      complete that milestone instead, so this phase claims no version bump. If a concrete
      need for RevenueCat's metrics comes up later, the scope below is the starting point,
@@ -459,8 +462,8 @@ Local mode ships first as v0.1 because it is the core plus a CLI; hosted mode wr
      before saving, and a revoked or invalid key surfaces as a clear, redacted error on the
      Sources page rather than a silent gap.
 
-**Lifetime installs → v0.3** (not a numbered phase — a small follow-up requested directly,
-not part of the original roadmap, but it joins 6a in completing v0.3 now that 6b is deferred)
+**Lifetime installs → v0.4** (not a numbered phase — a small follow-up requested directly,
+not part of the original roadmap, but it joins 6a in completing v0.4 now that 6b is deferred)
    - A "Lifetime" line in the email digest (text and HTML), right below the 7-day Installs
      line: every `installs` row either platform has ever written, combined, per-platform,
      unwindowed — the same rules as the weekly figure (never `redownloads`, `—` for a
@@ -480,7 +483,7 @@ For every phase: parser unit tests against scrubbed sample reports in `tests/fix
 
 - [x] **Revenue source** (Phase 3b). Store reports for everything, resolved in favor of the simpler option: RevenueCat (Phase 6b) hadn't been started when Phase 3b needed `active_subscriptions`/`active_trials`/`subscription_churn`, so there was nothing to narrow this phase's scope against. A later RevenueCat phase can still narrow or retire what the Apple subscription sources cover.
 - [x] **Currency conversion** (Phase 3). Proceeds are shown per currency, with no conversion and no new outbound calls (no daily reference rate lookup). A converted total is shown only if the user sets fixed rates and a display currency in `config.toml`'s `[digest]` section.
-- [x] **Language** (v0.3). Python, confirmed: mature JWT, GCS, keyring, and web libraries, and `pipx install` already working end to end since v0.1. No plan to port to Go.
-- [x] **License** (v0.3). Apache-2.0, confirmed. `LICENSE` already carries it; no change needed.
-- [x] **Name** (v0.3). Storepulse, confirmed: checked for PyPI, GitHub, and trademark conflicts, and the name is available. No longer a placeholder.
-- [x] **Backfill depth** (v0.3). The `init` wizard's and hosted Settings' first-backfill defaults: Apple (daily reports) defaults to 30 days back (`DEFAULT_APPLE_DAYS`, `cli/setup.py`); Google Play (monthly report files) defaults to 3 months back (`DEFAULT_PLAY_MONTHS`), unchanged. Both remain user-editable at setup time (the wizard's prompt, or the hosted Sources page's "Load history" form) — these are just the suggested starting points, not a hard cap; `storepulse backfill` itself takes any explicit range.
+- [x] **Language** (v0.4). Python, confirmed: mature JWT, GCS, keyring, and web libraries, and `pipx install` already working end to end since v0.1. No plan to port to Go.
+- [x] **License** (v0.4). Apache-2.0, confirmed. `LICENSE` already carries it; no change needed.
+- [x] **Name** (v0.4). Storepulse, confirmed: checked for PyPI, GitHub, and trademark conflicts, and the name is available. No longer a placeholder.
+- [x] **Backfill depth** (v0.4). The `init` wizard's and hosted Settings' first-backfill defaults: Apple (daily reports) defaults to 30 days back (`DEFAULT_APPLE_DAYS`, `cli/setup.py`); Google Play (monthly report files) defaults to 3 months back (`DEFAULT_PLAY_MONTHS`), unchanged. Both remain user-editable at setup time (the wizard's prompt, or the hosted Sources page's "Load history" form) — these are just the suggested starting points, not a hard cap; `storepulse backfill` itself takes any explicit range.
