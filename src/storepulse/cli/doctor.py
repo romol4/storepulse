@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import argparse
 
-from storepulse.cli.checks import Check, check_apple, check_google, check_vitals
+from storepulse.cli.checks import Check, check_apple, check_google, check_revenuecat, check_vitals
 from storepulse.cli.common import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    REVENUECAT_KEY_SECRET,
     SMTP_PASSWORD_SECRET,
     CliError,
     Env,
     apple_client,
     google_client,
+    revenuecat_client,
     store_for_run,
 )
 from storepulse.cli.setup import report
@@ -24,7 +26,7 @@ from storepulse.core.sources.google_client import parse_bucket_uri
 
 def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
     cfg = config.load()
-    if cfg.apple is None and cfg.google is None and cfg.email is None:
+    if cfg.apple is None and cfg.google is None and cfg.revenuecat is None and cfg.email is None:
         raise CliError("nothing is set up yet; run `storepulse init` first")
     checks: list[Check] = []
 
@@ -87,6 +89,14 @@ def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
                     gresult.checks += check_vitals(gclient, packages)
                 section("Google Play", gresult.checks)
 
+    if cfg.revenuecat is not None:
+        key = store.get(REVENUECAT_KEY_SECRET)
+        if key is None:
+            section("RevenueCat", [Check("fail", "no RevenueCat key saved; run `storepulse init`")])
+        else:
+            with revenuecat_client(env, cfg.revenuecat, key) as rc_client:
+                section("RevenueCat", check_revenuecat(rc_client).checks)
+
     if cfg.email is None:
         # Not configured is not itself a warning, matching how an unconfigured Apple or
         # Google is silently skipped above rather than counted against the tally.
@@ -103,7 +113,10 @@ def cmd_doctor(args: argparse.Namespace, env: Env) -> int:
             else:
                 section("SMTP", [Check("ok", f"login and NOOP succeeded for {cfg.email.host}")])
 
-    env.say("(doctor reads metadata only; the Apple check requests one day's sales report.)")
+    env.say(
+        "(doctor reads metadata only; the Apple check requests one day's sales report, and "
+        "the RevenueCat check fetches the project metrics overview.)"
+    )
     failed = [c for c in checks if c.level == "fail"]
     env.say()
     if failed:

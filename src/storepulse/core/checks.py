@@ -28,6 +28,12 @@ from storepulse.core.sources.google_client import (
     GoogleClient,
     GoogleError,
 )
+from storepulse.core.sources.revenuecat import (
+    RevenueCatClient,
+    RevenueCatError,
+    RevenueCatParseError,
+    parse_overview,
+)
 
 # Old enough that the report should exist, recent enough that Apple still keeps it.
 APPLE_PROBE_DAYS_AGO = 3
@@ -174,6 +180,19 @@ def check_google(client: GoogleClient, bucket: str) -> CheckResult:
         )
     except GoogleError as exc:
         result.checks.append(_google_fail(exc))
+    return result
+
+
+def check_revenuecat(client: RevenueCatClient) -> CheckResult:
+    """Fetch the project metrics overview once, live, before anything is saved (same
+    pattern as check_apple/check_google: a validated credential, or a clear failure)."""
+    result = CheckResult()
+    try:
+        metrics = parse_overview(client.fetch_overview())
+    except (RevenueCatError, RevenueCatParseError) as exc:
+        result.checks.append(Check("fail", str(exc)))
+        return result
+    result.checks.append(Check("ok", f"RevenueCat key accepted; {len(metrics)} metric(s) found."))
     return result
 
 

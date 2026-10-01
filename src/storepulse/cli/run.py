@@ -11,14 +11,15 @@ from storepulse.core import config, db, runner
 
 def cmd_run(args: argparse.Namespace, env: Env) -> int:
     cfg = config.load()
-    if cfg.apple is None and cfg.google is None:
+    if cfg.apple is None and cfg.google is None and cfg.revenuecat is None:
         raise CliError("nothing is set up yet; run `storepulse init` first")
     store = store_for_run(env, cfg)
 
     # A missing or broken credential for one platform is reported, not raised, so the
     # other still runs (docs/SPEC.md, "one failing source never blocks the others").
     clients = runner.clients_from_store(store, cfg, transport=env.transport, sleep=env.sleep)
-    apple, google, smtp_password = clients.apple, clients.google, clients.smtp_password
+    apple, google = clients.apple, clients.google
+    revenuecat, smtp_password = clients.revenuecat, clients.smtp_password
 
     def progress(label: str, outcome: str) -> None:
         env.say(f"  {label}  {outcome}")
@@ -30,11 +31,14 @@ def cmd_run(args: argparse.Namespace, env: Env) -> int:
                 stack.enter_context(apple)
             if google is not None:
                 stack.enter_context(google)
+            if revenuecat is not None:
+                stack.enter_context(revenuecat)
             result = runner.run_all(
                 conn,
                 cfg,
                 apple_client=apple,
                 google_client=google,
+                revenuecat_client=revenuecat,
                 smtp_password=smtp_password,
                 days=args.days,
                 send_email=not args.no_email,

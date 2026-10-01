@@ -13,10 +13,11 @@ from typing import Generic, TypeVar
 
 from storepulse.cli import collect
 from storepulse.cli import schedule as schedule_cli
-from storepulse.cli.checks import Check, CheckResult, check_apple, check_google
+from storepulse.cli.checks import Check, CheckResult, check_apple, check_google, check_revenuecat
 from storepulse.cli.common import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    REVENUECAT_KEY_SECRET,
     SMTP_PASSWORD_SECRET,
     CliError,
     Env,
@@ -25,6 +26,7 @@ from storepulse.cli.common import (
     ask_positive_int,
     confirm,
     google_client,
+    revenuecat_client,
     store_for_setup,
 )
 from storepulse.core import config, db, discovery, mailer
@@ -170,6 +172,39 @@ def _setup_google(
     return Setup(google, raw, sa_path, result, clean=clean)
 
 
+def _revenuecat_key(env: Env, cfg: config.Config, secrets: Callable[[], SecretStore]) -> str:
+    if cfg.secret_store and cfg.revenuecat is not None:
+        answer = env.getpass("RevenueCat secret API key (Enter to keep the saved key): ")
+        if answer:
+            return answer
+        stored = secrets().get(REVENUECAT_KEY_SECRET)
+        if stored is None:
+            raise CliError("no saved RevenueCat key found; enter it again")
+        return stored
+    return env.getpass("RevenueCat secret API key: ")
+
+
+def _setup_revenuecat(
+    env: Env, cfg: config.Config, secrets: Callable[[], SecretStore]
+) -> Setup[config.RevenueCatConfig]:
+    prev = cfg.revenuecat
+    env.say()
+    env.say("RevenueCat")
+    env.say("A read-only Secret v2 API key (RevenueCat > Project settings > API keys) and")
+    env.say("the project ID (README, 'RevenueCat').")
+    project_id = ask(env, "Project ID", prev.project_id if prev else "")
+    api_key = _revenuecat_key(env, cfg, secrets)
+    revenuecat_cfg = config.RevenueCatConfig(project_id=project_id)
+    env.say("Checking the key with RevenueCat...")
+    with revenuecat_client(env, revenuecat_cfg, api_key) as client:
+        result = check_revenuecat(client)
+    for check in result.checks:
+        report(env, check)
+    if result.failed:
+        raise CliError(result.failed[0].text)
+    return Setup(revenuecat_cfg, api_key, None, result, clean=True)
+
+
 def _email_password(env: Env, cfg: config.Config, secrets: Callable[[], SecretStore]) -> str:
     if cfg.secret_store and cfg.email is not None:
         answer = env.getpass("SMTP password (Enter to keep the saved password): ")
@@ -257,7 +292,7 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         )
     cfg = config.load()
     env.say("Storepulse setup. Each platform is optional; set up at least one.")
-    apple = google = email = None
+    apple = google = revenuecat = email = None
     # One store for the whole run, opened on first use: reading a saved key and saving
     # both go through it, so an encrypted-file store asks for its passphrase only once.
     secrets = functools.cache(functools.partial(store_for_setup, env, cfg))
@@ -267,11 +302,15 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         apple = _setup_apple(env, cfg, secrets)
     if confirm(env, "Set up Google Play?", default=cfg.google is None):
         google = _setup_google(env, cfg, secrets)
+    if confirm(env, "Set up RevenueCat?", default=cfg.revenuecat is None):
+        revenuecat = _setup_revenuecat(env, cfg, secrets)
     if confirm(env, "Set up email for the daily digest?", default=cfg.email is None):
         email = _setup_email(env, cfg, secrets)
-    if apple is None and google is None and email is None:
-        if cfg.apple is None and cfg.google is None:
-            raise CliError("nothing was set up; answer yes for Apple, Google Play, or email")
+    if apple is None and google is None and revenuecat is None and email is None:
+        if cfg.apple is None and cfg.google is None and cfg.revenuecat is None:
+            raise CliError(
+                "nothing was set up; answer yes for Apple, Google Play, RevenueCat, or email"
+            )
         env.say("Nothing changed.")
         return 0
 
@@ -283,6 +322,9 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
     if google is not None:
         store.set(GOOGLE_SA_SECRET, google.secret)
         cfg.google = google.config
+    if revenuecat is not None:
+        store.set(REVENUECAT_KEY_SECRET, revenuecat.secret)
+        cfg.revenuecat = revenuecat.config
     if email is not None:
         store.set(SMTP_PASSWORD_SECRET, email.secret)
         cfg.email = email.config
@@ -294,6 +336,8 @@ def cmd_init(args: argparse.Namespace, env: Env) -> int:
         env.say(f"  .p8 fingerprint {store.fingerprint(APPLE_P8_SECRET)}")
     if google is not None:
         env.say(f"  service account fingerprint {store.fingerprint(GOOGLE_SA_SECRET)}")
+    if revenuecat is not None:
+        env.say(f"  RevenueCat key fingerprint {store.fingerprint(REVENUECAT_KEY_SECRET)}")
     if email is not None:
         env.say(f"  SMTP password fingerprint {store.fingerprint(SMTP_PASSWORD_SECRET)}")
     env.say(f"Settings saved to: {cfg_path}")

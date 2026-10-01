@@ -16,6 +16,7 @@ from storepulse.core import config, mailer
 from storepulse.core.secrets import (
     APPLE_P8_SECRET,
     GOOGLE_SA_SECRET,
+    REVENUECAT_KEY_SECRET,
     SECRETS_FILENAME,
     SMTP_PASSWORD_SECRET,
     SecretStore,
@@ -26,6 +27,7 @@ from storepulse.core.sources import apple_sales
 from storepulse.core.sources.apple_client import AppleClient
 from storepulse.core.sources.google_auth import ServiceAccount
 from storepulse.core.sources.google_client import GoogleClient
+from storepulse.core.sources.revenuecat import RevenueCatClient
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,7 @@ def store_for_run(env: Env, cfg: config.Config) -> SecretStore:
     return open_store(cfg.secret_store, config.config_dir(), existing_passphrase(env))
 
 
-__all__ = ["APPLE_P8_SECRET", "GOOGLE_SA_SECRET", "SMTP_PASSWORD_SECRET"]
+__all__ = ["APPLE_P8_SECRET", "GOOGLE_SA_SECRET", "REVENUECAT_KEY_SECRET", "SMTP_PASSWORD_SECRET"]
 
 
 def apple_client(env: Env, apple: config.AppleConfig, p8: str) -> AppleClient:
@@ -148,3 +150,7 @@ def apple_client(env: Env, apple: config.AppleConfig, p8: str) -> AppleClient:
 
 def google_client(env: Env, sa: ServiceAccount) -> GoogleClient:
     return GoogleClient(sa, transport=env.transport, sleep=env.sleep)
+
+
+def revenuecat_client(env: Env, cfg: config.RevenueCatConfig, api_key: str) -> RevenueCatClient:
+    return RevenueCatClient(api_key, cfg.project_id, transport=env.transport, sleep=env.sleep)

@@ -8,6 +8,7 @@ from storepulse.core.checks import (
     Level,
     check_apple,
     check_google,
+    check_revenuecat,
     check_vitals,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "Level",
     "check_apple",
     "check_google",
+    "check_revenuecat",
     "check_vitals",
 ]
