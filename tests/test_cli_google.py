@@ -77,7 +77,7 @@ def _google_only(sa_file: Path, *extra: str) -> list[str]:
 
 
 def test_init_google_only(memory_keyring: MemoryKeyring, sa_file: Path, sa_json: str) -> None:
-    env = _env(_google_only(sa_file, "n", "n"), google=FakeGoogle(objects=standard_objects()))
+    env = _env(_google_only(sa_file, "n", "n", "n"), google=FakeGoogle(objects=standard_objects()))
     assert main(["init"], env) == 0
     out = _out(env)
     assert "Google key accepted" in out and "billFT (com.example.billft)" in out
@@ -101,7 +101,7 @@ def test_init_both_platforms_then_backfill(
     apple = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
     google = FakeGoogle(objects=standard_objects())
     answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file)]
-    answers += ["y", str(sa_file), URI, "n", "y", "3", "2"]
+    answers += ["y", str(sa_file), URI, "n", "n", "y", "3", "2"]
     env = _env(answers, apple, google)
     assert main(["init"], env) == 0, _err(env)
     cfg = config.load()
@@ -113,7 +113,7 @@ def test_init_both_platforms_then_backfill(
 
 
 def test_init_neither_is_an_error(memory_keyring: MemoryKeyring) -> None:
-    env = _env(["n", "n", "n"])
+    env = _env(["n", "n", "n", "n"])
     assert main(["init"], env) == 1
     assert "nothing was set up" in _err(env)
 
@@ -132,7 +132,7 @@ def test_init_pending_permission_can_save_anyway(
     memory_keyring: MemoryKeyring, sa_file: Path
 ) -> None:
     env = _env(
-        _google_only(sa_file, "y", "n", "n"),
+        _google_only(sa_file, "y", "n", "n", "n"),
         google=FakeGoogle(gcs_status=403, reporting_status=403),
     )
     assert main(["init"], env) == 0
@@ -156,7 +156,7 @@ def test_init_bad_bucket_uri(memory_keyring: MemoryKeyring, sa_file: Path) -> No
 
 
 def _setup_google(sa_file: Path) -> None:
-    env = _env(_google_only(sa_file, "n"), google=FakeGoogle(objects=standard_objects()))
+    env = _env(_google_only(sa_file, "n", "n"), google=FakeGoogle(objects=standard_objects()))
     assert main(["init", "--no-backfill"], env) == 0
 
 
@@ -207,7 +207,12 @@ def test_backfill_google_before_init() -> None:
 def test_doctor_all_ok(memory_keyring: MemoryKeyring, sa_file: Path, p8_file: Path) -> None:
     apple = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
     google = FakeGoogle(objects=standard_objects())
-    answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "y", str(sa_file), URI, "n"]
+    answers = [
+        "y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file),
+        "y", str(sa_file), URI,
+        "n",  # RevenueCat
+        "n",  # email
+    ]  # fmt: skip
     assert main(["init", "--no-backfill"], _env(answers, apple, google)) == 0
     env = _env([], apple, google)
     assert main(["doctor"], env) == 0
@@ -230,7 +235,7 @@ def test_doctor_pending_permission(memory_keyring: MemoryKeyring, sa_file: Path)
 
 def test_doctor_apple_missing_role(memory_keyring: MemoryKeyring, p8_file: Path) -> None:
     ok = FakeApple(apps=FT_APPS, default_report=fixture_bytes("summary_normal.tsv.gz"))
-    answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n"]
+    answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n", "n"]
     assert main(["init", "--no-backfill"], _env(answers, ok)) == 0
     broken = FakeApple(apps=FT_APPS, sales={})
     broken.default_report = None

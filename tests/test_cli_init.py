@@ -47,8 +47,8 @@ def _env(fake: FakeApple, answers: list[str], secrets: list[str] | None = None) 
 
 
 def _answers(p8_file: Path, *extra: str) -> list[str]:
-    """Answers: Apple yes (four prompts), Google no, email no, then ``extra``."""
-    return ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n", *extra]
+    """Answers: Apple yes (four prompts), Google no, RevenueCat no, email no, then ``extra``."""
+    return ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n", "n", *extra]
 
 
 def _out(env: Env) -> str:

@@ -71,6 +71,7 @@ def _err(env: Env) -> str:
 EMAIL_ANSWERS = [
     "n",  # Apple
     "n",  # Google
+    "n",  # RevenueCat
     "y",  # set up email
     "smtp.example.com", "587", "starttls", "me@example.com",
     "me@example.com", "you1@example.com, you2@example.com",
@@ -109,7 +110,7 @@ def test_email_setup_saves_nothing_if_test_email_fails(memory_keyring: object) -
 
 def test_email_setup_rejects_invalid_security() -> None:
     answers = [
-        "n", "n", "y",
+        "n", "n", "n", "y",
         "smtp.example.com", "587", "plaintext", "me@example.com",
         "me@example.com", "me@example.com",
     ]  # fmt: skip
@@ -120,7 +121,7 @@ def test_email_setup_rejects_invalid_security() -> None:
 
 def test_email_setup_requires_at_least_one_to_address() -> None:
     answers = [
-        "n", "n", "y",
+        "n", "n", "n", "y",
         "smtp.example.com", "587", "starttls", "me@example.com",
         "me@example.com", "  , ,  ",
     ]  # fmt: skip
@@ -136,7 +137,7 @@ def test_reinit_email_reuses_saved_password(memory_keyring: object) -> None:
     # Re-run: change the port, leave the password blank to reuse the saved one, and
     # accept the previous from/to defaults with a blank answer.
     answers = [
-        "n", "n", "y",
+        "n", "n", "n", "y",
         "smtp.example.com", "465", "ssl", "me@example.com",
         "", "",  # from, to: accept previous defaults
         "",  # run time: accept default
@@ -195,7 +196,7 @@ def test_doctor_without_email_is_informational_not_a_warning(
         apps=[{"id": "1", "name": "deskFT", "sku": "D", "bundle": "com.example.d"}],
         default_report=fixture_bytes("summary_empty.tsv.gz"),
     )
-    init_answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n"]
+    init_answers = ["y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file), "n", "n", "n"]
     env = _env(init_answers, apple=fake)
     assert main(["init", "--no-backfill"], env) == 0, _err(env)
 

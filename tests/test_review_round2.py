@@ -198,7 +198,7 @@ def _out(env: Env) -> str:
 
 
 def _init_google(sa_file: Path, google: FakeGoogle) -> None:
-    env = _env(["n", "y", str(sa_file), URI, "n"], google)
+    env = _env(["n", "y", str(sa_file), URI, "n", "n"], google)
     assert main(["init", "--no-backfill"], env) == 0, _out(env)
 
 
@@ -223,7 +223,7 @@ def test_save_anyway_recovers_without_the_key_file(
     memory_keyring: MemoryKeyring, sa_file: Path
 ) -> None:
     pending = FakeGoogle(gcs_status=403, reporting_status=403)
-    env = _env(["n", "y", str(sa_file), URI, "y", "n"], pending)
+    env = _env(["n", "y", str(sa_file), URI, "y", "n", "n"], pending)
     assert main(["init", "--no-backfill"], env) == 0
     assert "You can now delete" not in _out(env)
     assert "until `storepulse doctor` passes" in _out(env)
@@ -246,11 +246,11 @@ def test_reinit_defaults_to_no_and_reuses_stored_key(
     _init_google(sa_file, google)
     sa_file.unlink()
     # Google is configured, so Enter at "Set up Google Play? [y/N]" skips it.
-    env = _env(["n", "", "n"], google)
+    env = _env(["n", "", "n", "n"], google)
     assert main(["init", "--no-backfill"], env) == 0
     assert "Nothing changed." in _out(env)
     # Re-running Google with a blank path reuses the stored key.
-    env = _env(["n", "y", "", URI, "n"], google)
+    env = _env(["n", "y", "", URI, "n", "n"], google)
     assert main(["init", "--no-backfill"], env) == 0, _out(env)
     assert "You can now delete" not in _out(env)
 

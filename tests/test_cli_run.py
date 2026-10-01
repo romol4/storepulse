@@ -72,6 +72,7 @@ def _init_apple_and_email(p8_file: Path) -> None:
     answers = [
         "y", "ISSUER-1", "KEYID12345", "85000000", str(p8_file),  # Apple
         "n",  # Google
+        "n",  # RevenueCat
         "y", "smtp.example.com", "587", "starttls", "me@example.com",  # Email
         "me@example.com", "you@example.com",
         "",  # run time: accept default
