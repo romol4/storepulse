@@ -361,6 +361,27 @@ def test_a_pair_is_one_digest_row_with_per_currency_money(conn: sqlite3.Connecti
     assert "crash — daily, 2.0% 28d" in result.html
 
 
+def test_a_pair_shows_a_dash_for_a_day_one_member_has_not_loaded(
+    conn: sqlite3.Connection,
+) -> None:
+    """iOS has Sep 27, Android stops at Sep 26: adding only iOS's 3 installs would
+    understate the pair's day without saying so, so that cell is "—"."""
+    ids = _seed_pair(conn)
+    d = (AS_OF + timedelta(days=1)).isoformat()
+    db.replace_source_day(
+        conn, "apple_sales", d, [db.MetricRow(d, ids["1"], "US", "installs", "", 3.0)]
+    )
+    db.log_ingest(conn, source="apple_sales", report_date=d, started_at=db.utc_now(), status="ok")
+    discovery.pair_apps(conn)
+    result = digest.build_digest(conn, CFG, today=date(2026, 9, 28))
+    # Sep 21-26: 3 iOS + 4 Android each day. Sep 27: Android not loaded yet.
+    # Month and lifetime add what each member has: 24 iOS (Sep 20-27) + 28 Android.
+    row = next(
+        line for line in result.text.splitlines() if line.startswith("  libFT (iOS + Android) ")
+    )
+    assert row.split()[-9:] == [*["7"] * 6, "*—*", "*52*", "*52*"]
+
+
 def test_local_mode_never_merges(conn: sqlite3.Connection) -> None:
     _seed_pair(conn)  # no pair_apps call: local mode never writes pair_key
     result = digest.build_digest(conn, CFG, today=TODAY)
