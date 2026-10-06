@@ -1,10 +1,11 @@
-"""Builds the daily digest: plain-text and HTML bodies, and inline PNG sparklines.
+"""Builds the daily digest: plain-text and HTML bodies with a per-app installs table.
 
 As-of day (docs/SPEC.md): each *configured* platform's own latest loaded day is found
 independently, and the digest's as-of day is the minimum of those — the most
-conservative shared date. That single date drives the header, the 7-day-vs-previous-7-day
-comparison, and every per-platform figure, so the header date and the combined totals
-always describe the same window.
+conservative shared date. That single date drives the 7-day-vs-previous-7-day
+comparison, the per-app table's day columns, and every per-platform figure, so the
+combined totals and the table always describe the same window. The title shows the day
+the digest was generated instead, and a "Data through" line gives the as-of day.
 
 Local mode's ``apps`` table has no ``pair_key`` (that is a hosted-mode-only addition), so
 an iOS and Android build of the same app are not merged here: "top app" and the per-app
@@ -19,8 +20,9 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from email.message import EmailMessage
 from html import escape
+from typing import NamedTuple
 
-from storepulse.core import charts, config
+from storepulse.core import config
 from storepulse.core.sources import (
     apple_analytics,
     apple_sales,
@@ -40,9 +42,9 @@ _APPROX = "≈"
 _NO_DATA = "—"
 
 _WINDOW_DAYS = 7
-_SPARKLINE_DAYS = 30
-# _build_app_rows slices both 7-day windows out of the sparkline series.
-assert _SPARKLINE_DAYS >= 2 * _WINDOW_DAYS
+# _build_app_rows slices both 7-day windows out of one daily series: the last 7 values
+# are the table's day columns, the 7 before them the previous week for the trend.
+_SERIES_DAYS = 2 * _WINDOW_DAYS
 _LABEL_WIDTH = 10
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -99,8 +101,8 @@ class AppRow:
     platform: str  # 'ios' or 'android'
     installs: float
     proceeds: dict[str, float]
-    sparkline_cid: str
-    sparkline_png: bytes
+    month_installs: float = 0.0  # calendar month of the as-of day, up to and including it
+    lifetime_installs: float = 0.0
     crash_rate: float | None = None
     crash_rate_28d: float | None = None
     anr_rate: float | None = None
@@ -128,12 +130,13 @@ class Digest:
     as_of: date | None
     text: str
     html: str
-    images: list[tuple[str, bytes]] = field(default_factory=list)
+    today: date | None = None  # the day the digest was generated; titles the email
 
 
 @dataclass
 class _Context:
     as_of: date
+    today: date
     cfg: config.Config
     ios_installs: float
     android_installs: float
@@ -383,7 +386,7 @@ def _daily_series(
     *,
     all_only: bool,
     end: date,
-    days: int = _SPARKLINE_DAYS,
+    days: int = _SERIES_DAYS,
 ) -> list[float]:
     """Daily installs, oldest first, missing days filled with 0."""
     start = end - timedelta(days=days - 1)
@@ -423,17 +426,24 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
         "SELECT id, name, display_name, platform, store_id, hidden, pair_key FROM apps "
         "ORDER BY name"
     ).fetchall()
+    month_window = Window(as_of.replace(day=1), as_of)
     rows: list[AppRow] = []
     for record in apps:
         app_id, platform = int(record["id"]), str(record["platform"])
         name = str(record["display_name"] or record["name"])
         source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
         all_only = platform == "android"
-        # The 30-day sparkline series ends on as_of, so it already holds both 7-day
-        # windows; slice it instead of querying each window again.
+        # The daily series ends on as_of, so it already holds both 7-day windows;
+        # slice it instead of querying each window again.
         series = _daily_series(conn, source, app_id, all_only=all_only, end=as_of)
         installs = sum(series[-_WINDOW_DAYS:])
         prev_installs = sum(series[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
+        if platform == "ios":
+            month_installs = _ios_installs(conn, month_window, app_id)
+            lifetime_installs = _ios_lifetime_installs(conn, app_id)
+        else:
+            month_installs = _android_installs(conn, month_window, app_id)
+            lifetime_installs = _android_lifetime_installs(conn, app_id)
         proceeds = (
             _window_by_currency(conn, apple_sales.SOURCE, "proceeds", window, app_id=app_id)
             if platform == "ios"
@@ -445,8 +455,8 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             platform=platform,
             installs=installs,
             proceeds=proceeds,
-            sparkline_cid=f"app{app_id}",
-            sparkline_png=charts.render_sparkline(series),
+            month_installs=month_installs,
+            lifetime_installs=lifetime_installs,
             store_id=str(record["store_id"]),
             prev_installs=prev_installs,
             hidden=bool(record["hidden"]),
@@ -516,8 +526,8 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
                 platform="paired",
                 installs=ios.installs + android.installs,
                 proceeds=_merge_currency(ios.proceeds, android.proceeds),
-                sparkline_cid=f"pair{ios.app_id}",
-                sparkline_png=charts.render_sparkline(series),
+                month_installs=ios.month_installs + android.month_installs,
+                lifetime_installs=ios.lifetime_installs + android.lifetime_installs,
                 crash_rate=android.crash_rate,
                 crash_rate_28d=android.crash_rate_28d,
                 anr_rate=android.anr_rate,
@@ -797,8 +807,91 @@ def _quiet_apps_text(count: int) -> str:
     return f"+{count} more {noun} with no installs or proceeds in either week"
 
 
+class _Head(NamedTuple):
+    """One column of the per-app table. ``text`` heads the plain-text table; the HTML
+    table stacks ``top`` over ``bottom``."""
+
+    text: str
+    top: str
+    bottom: str
+    highlight: bool
+
+
+def _table_heads(as_of: date) -> list[_Head]:
+    """The 7 days ending on the as-of day, then the as-of day's month and lifetime. The
+    latest day, the month and lifetime are the highlighted columns."""
+    heads = []
+    for i in range(_WINDOW_DAYS):
+        day = as_of - timedelta(days=_WINDOW_DAYS - 1 - i)
+        heads.append(
+            _Head(
+                _short_date(day), _WEEKDAYS[day.weekday()], _short_date(day), i == _WINDOW_DAYS - 1
+            )
+        )
+    month = _MONTHS_ABBR[as_of.month - 1]
+    heads.append(_Head(f"{month} total", month, "total", True))
+    heads.append(_Head("Lifetime", "Lifetime", "total", True))
+    return heads
+
+
+def _row_cells(row: AppRow) -> list[float]:
+    """The values under _table_heads, in the same order."""
+    return [*row.series[-_WINDOW_DAYS:], row.month_installs, row.lifetime_installs]
+
+
+def _proceeds_text(row: AppRow) -> str:
+    """The app's proceeds per currency, or "" when it has none (not worth a line of its own
+    on every app that sells nothing)."""
+    return ", ".join(_format_money(c, row.proceeds[c]) for c in sorted(row.proceeds))
+
+
+def _analytics_text(row: AppRow) -> str:
+    # (Android-only rows carry no analytics; a paired row carries its iOS member's.)
+    if row.impressions is None or row.page_views is None:
+        return ""
+    return f"{row.impressions:.0f} impressions, {row.page_views:.0f} page views"
+
+
+def _text_table(ctx: _Context) -> list[str]:
+    """The per-app table as aligned monospace text. Highlighted columns are wrapped in
+    asterisks, since plain text can't bold."""
+    heads = _table_heads(ctx.as_of)
+
+    def cell(text: str, highlight: bool) -> str:
+        return f"*{text}*" if highlight else text
+
+    header = [cell(h.text, h.highlight) for h in heads]
+    body = [
+        (
+            f"{row.name} ({row.platform_label})",
+            [
+                cell(f"{value:,.0f}", head.highlight)
+                for value, head in zip(_row_cells(row), heads, strict=True)
+            ],
+        )
+        for row in ctx.app_rows
+    ]
+    name_width = max((len(name) for name, _ in body), default=0)
+    widths = [max(len(header[i]), *(len(cells[i]) for _, cells in body)) for i in range(len(heads))]
+
+    def line(name: str, cells: list[str]) -> str:
+        columns = "".join(f"  {c.rjust(w)}" for c, w in zip(cells, widths, strict=True))
+        return f"  {name.ljust(name_width)}{columns}"
+
+    lines = [line("", header)]
+    for row, (name, cells) in zip(ctx.app_rows, body, strict=True):
+        lines.append(line(name, cells))
+        extras = [t for t in (_proceeds_text(row), _analytics_text(row)) if t]
+        if extras:
+            lines.append(f"    {f' {_DOT} '.join(extras)}")
+    return lines
+
+
 def _render_text(ctx: _Context) -> str:
-    lines = [f"Storepulse {_DOT} {_format_header_date(ctx.as_of)}"]
+    lines = [
+        f"Storepulse {_DOT} {_format_header_date(ctx.today)}",
+        f"Data through {_format_header_date(ctx.as_of)}",
+    ]
 
     combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f"   {f' {_DOT} '.join(breakdown_parts)}" if breakdown_parts else ""
@@ -840,20 +933,8 @@ def _render_text(ctx: _Context) -> str:
     if ctx.app_rows or ctx.quiet_apps:
         lines.append("")
         lines.append("Apps")
-        for row in ctx.app_rows:
-            platform_label = row.platform_label
-            proceeds_text = (
-                ", ".join(_format_money(c, row.proceeds[c]) for c in sorted(row.proceeds))
-                if row.proceeds
-                else "no proceeds"
-            )
-            lines.append(
-                f"  {row.name} ({platform_label}): {_installs_text(row.installs)}, {proceeds_text}"
-            )
-            if row.impressions is not None and row.page_views is not None:
-                lines.append(
-                    f"    {row.impressions:.0f} impressions, {row.page_views:.0f} page views"
-                )
+        if ctx.app_rows:
+            lines.extend(_text_table(ctx))
         if ctx.quiet_apps:
             lines.append(f"  {_quiet_apps_text(ctx.quiet_apps)}")
 
@@ -864,61 +945,74 @@ def _html_escape(text: str) -> str:
     return escape(text, quote=True)
 
 
+# Inline styles only: email clients strip <style> blocks and classes.
+_GREY_LINE = '<div style="color:#666;font-size:12px;">'
+_TD = "padding:6px 8px;border-bottom:1px solid #eee;"
+_TD_NUM = f"{_TD}text-align:right;white-space:nowrap;"
+_TH = "padding:6px 8px;border-bottom:2px solid #ddd;font-size:12px;font-weight:normal;color:#444;"
+_HIGHLIGHT = "background:#f1f5f9;font-weight:bold;"
+_ZERO = "color:#9ca3af;"
+
+
+def _html_app_extras(row: AppRow) -> str:
+    """The small grey lines under an app's name: proceeds, vitals, analytics."""
+    lines = []
+    proceeds = _proceeds_text(row)
+    if proceeds:
+        lines.append(f"{_GREY_LINE}{_html_escape(proceeds)}</div>")
+    # Either rate can independently be missing: Google's Reporting API omits a
+    # metric set's row when there's insufficient user population for statistical
+    # confidence, and crash/ANR are queried as two separate metric sets. Gating on
+    # crash_rate_28d alone would hide real, valid ANR data on a day crash_rate_28d
+    # is absent (or vice versa).
+    # (iOS rows carry no vitals; a paired row carries its Android member's.)
+    if row.crash_rate_28d is not None or row.anr_rate_28d is not None:
+        # A rate Google withheld is shown as "—", never as 0.0%: a missing crash
+        # rate must not read as a perfectly stable app.
+        lines.append(
+            f"{_GREY_LINE}crash {_pct(row.crash_rate)} daily, {_pct(row.crash_rate_28d)} 28d "
+            f"&middot; anr {_pct(row.anr_rate)} daily, {_pct(row.anr_rate_28d)} 28d</div>"
+        )
+    # A paired row carries its iOS member's analytics, so it can show vitals and
+    # analytics together, not just one or the other.
+    analytics = _analytics_text(row)
+    if analytics:
+        lines.append(f"{_GREY_LINE}{analytics}</div>")
+    return "".join(lines)
+
+
+def _html_table(ctx: _Context) -> str:
+    if not (ctx.app_rows or ctx.quiet_apps):
+        return ""
+    heads = _table_heads(ctx.as_of)
+    header = [f'<th style="{_TH}text-align:left;">App</th>']
+    for head in heads:
+        style = f"{_TH}text-align:right;{_HIGHLIGHT if head.highlight else ''}"
+        header.append(f'<th style="{style}">{head.top}<br>{head.bottom}</th>')
+    rows = [f"<tr>{''.join(header)}</tr>"]
+    for row in ctx.app_rows:
+        cells = [
+            f'<td style="{_TD}"><strong>{_html_escape(row.name)}</strong> '
+            f"({row.platform_label}){_html_app_extras(row)}</td>"
+        ]
+        for value, head in zip(_row_cells(row), heads, strict=True):
+            style = f"{_TD_NUM}{_HIGHLIGHT if head.highlight else ''}{'' if value else _ZERO}"
+            cells.append(f'<td style="{style}">{value:,.0f}</td>')
+        rows.append(f"<tr>{''.join(cells)}</tr>")
+    if ctx.quiet_apps:
+        rows.append(
+            f'<tr><td colspan="{len(heads) + 1}" style="padding:8px;color:#666;">'
+            f"{_quiet_apps_text(ctx.quiet_apps)}</td></tr>"
+        )
+    table_style = "border-collapse:collapse;width:100%;margin-top:8px;"
+    return f'<table style="{table_style}">{"".join(rows)}</table>'
+
+
 def _render_html(ctx: _Context) -> str:
     combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f" &mdash; {' &middot; '.join(breakdown_parts)}" if breakdown_parts else ""
     lifetime_combined, lifetime_parts = _lifetime_installs_summary(ctx)
     lifetime_breakdown = f" &mdash; {' &middot; '.join(lifetime_parts)}" if lifetime_parts else ""
-
-    rows_html = []
-    for row in ctx.app_rows:
-        platform_label = row.platform_label
-        proceeds_text = (
-            ", ".join(_format_money(c, row.proceeds[c]) for c in sorted(row.proceeds))
-            if row.proceeds
-            else "no proceeds"
-        )
-        vitals_text = ""
-        # Either rate can independently be missing: Google's Reporting API omits a
-        # metric set's row when there's insufficient user population for statistical
-        # confidence, and crash/ANR are queried as two separate metric sets. Gating on
-        # crash_rate_28d alone would hide real, valid ANR data on a day crash_rate_28d
-        # is absent (or vice versa).
-        # (iOS rows carry no vitals; a paired row carries its Android member's.)
-        if row.crash_rate_28d is not None or row.anr_rate_28d is not None:
-            # A rate Google withheld is shown as "—", never as 0.0%: a missing crash
-            # rate must not read as a perfectly stable app.
-            vitals_text = (
-                '<div style="color:#666;font-size:12px;">'
-                f"crash {_pct(row.crash_rate)} daily, {_pct(row.crash_rate_28d)} 28d "
-                f"&middot; anr {_pct(row.anr_rate)} daily, {_pct(row.anr_rate_28d)} 28d</div>"
-            )
-        analytics_text = ""
-        # (Android-only rows carry no analytics; a paired row carries its iOS member's —
-        # so a paired row can show vitals and analytics together, not just one or the
-        # other.)
-        if row.impressions is not None and row.page_views is not None:
-            analytics_text = (
-                '<div style="color:#666;font-size:12px;">'
-                f"{row.impressions:.0f} impressions, {row.page_views:.0f} page views</div>"
-            )
-        rows_html.append(
-            "<tr>"
-            '<td style="padding:8px 12px;border-bottom:1px solid #eee;">'
-            f'<img src="cid:{row.sparkline_cid}" width="{charts.WIDTH}" height="{charts.HEIGHT}" '
-            f'alt="30-day installs trend" style="display:block;"></td>'
-            '<td style="padding:8px 12px;border-bottom:1px solid #eee;">'
-            f"<strong>{_html_escape(row.name)}</strong> ({platform_label})<br>"
-            f"{_installs_text(row.installs)}, {_html_escape(proceeds_text)}"
-            f"{vitals_text}{analytics_text}</td>"
-            "</tr>"
-        )
-
-    if ctx.quiet_apps:
-        rows_html.append(
-            '<tr><td></td><td style="padding:8px 12px;color:#666;">'
-            f"{_quiet_apps_text(ctx.quiet_apps)}</td></tr>"
-        )
 
     warnings_html = ""
     if ctx.vitals_warnings:
@@ -954,8 +1048,9 @@ def _render_html(ctx: _Context) -> str:
         )
 
     return (
-        '<div style="font-family:sans-serif;color:#111;max-width:600px;">'
-        f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.as_of)}</h2>'
+        '<div style="font-family:sans-serif;color:#111;max-width:720px;">'
+        f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.today)}</h2>'
+        f'<p style="color:#666;margin:4px 0;">Data through {_format_header_date(ctx.as_of)}</p>'
         f'<p style="font-size:18px;margin:4px 0;">Installs: {combined:.0f}'
         f"{_trend_suffix(combined, prev_combined)}{breakdown}</p>"
         f'<p style="color:#666;margin:4px 0;">Lifetime installs: {lifetime_combined:,.0f}'
@@ -963,7 +1058,7 @@ def _render_html(ctx: _Context) -> str:
         f"{proceeds_html}"
         f"{sales_gross_html}{top_app_html}{warnings_html}"
         f'<p style="color:#666;">Data: {ctx.data_line or "&mdash;"}</p>'
-        f'<table style="border-collapse:collapse;width:100%;">{"".join(rows_html)}</table>'
+        f"{_html_table(ctx)}"
         "</div>"
     )
 
@@ -980,7 +1075,7 @@ def _empty_digest() -> Digest:
         "<p>No data has been collected yet. Run <code>storepulse run</code> after setup "
         "finishes its first collection.</p></div>"
     )
-    return Digest(as_of=None, text=text, html=html, images=[])
+    return Digest(as_of=None, text=text, html=html)
 
 
 def build_digest(
@@ -1017,6 +1112,7 @@ def build_digest(
     quiet_apps = sum(1 for r in listable if not r.active)
     ctx = _Context(
         as_of=as_of,
+        today=today,
         cfg=cfg,
         ios_installs=_ios_installs(conn, window),
         android_installs=_android_installs(conn, window),
@@ -1042,26 +1138,17 @@ def build_digest(
         html = html.removesuffix("</div>") + (
             f'<p><a href="{_html_escape(dashboard_url)}">Open the dashboard</a></p></div>'
         )
-    return Digest(
-        as_of=as_of,
-        text=text,
-        html=html,
-        images=[(row.sparkline_cid, row.sparkline_png) for row in app_rows],
-    )
+    return Digest(as_of=as_of, text=text, html=html, today=today)
 
 
 def to_email_message(digest: Digest, email_cfg: config.EmailConfig) -> EmailMessage:
     msg = EmailMessage()
-    if digest.as_of is not None:
-        msg["Subject"] = f"Storepulse {_DOT} {_format_header_date(digest.as_of)}"
+    if digest.today is not None:
+        msg["Subject"] = f"Storepulse {_DOT} {_format_header_date(digest.today)}"
     else:
         msg["Subject"] = "Storepulse"
     msg["From"] = email_cfg.from_addr
     msg["To"] = ", ".join(email_cfg.to_addrs)
     msg.set_content(digest.text)
     msg.add_alternative(digest.html, subtype="html")
-    html_part = msg.get_payload(1)
-    assert isinstance(html_part, EmailMessage)  # true whenever policy.default builds the parts
-    for cid, png in digest.images:
-        html_part.add_related(png, "image", "png", cid=f"<{cid}>")
     return msg

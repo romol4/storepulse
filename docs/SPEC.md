@@ -314,10 +314,12 @@ One run per day (default 10:30 in the user's time zone) re-pulls the last 7 days
 
 Sent through the user's own SMTP server (Gmail or Fastmail app password, SES, Postmark, etc.), so no Storepulse-run mail service is needed.
 
-- HTML body with plain-text fallback; charts rendered server-side as small PNG images embedded inline (email clients strip SVG and JavaScript).
-- **As-of day:** each configured platform's own latest day with loaded data is found independently; the digest's as-of day is the minimum of those. That single date drives the header and every combined figure, so Apple and Play lagging by different amounts never produces mismatched totals. Phase 3 compares the 7 days ending on it with the 7 days before; a separate "yesterday" figure was simplified out for now.
-- Contents: 7-day totals vs the previous 7 days, a lifetime installs total since this database's first collected day, per-app rows with a 30-day installs sparkline, proceeds listed per currency (no conversion; a converted total appears only when `config.toml`'s `[digest]` section sets fixed rates and a display currency — no new outbound calls), vitals warnings, and data freshness per source.
+- HTML body with plain-text fallback. No images: the per-app section is a table, styled with inline CSS only (email clients strip `<style>` blocks, SVG and JavaScript).
+- **Title date:** the subject and header show the day the digest was generated (the reporting day passed to `build_digest`), not the as-of day, so the email reads as current even when a platform lags. A "Data through" line under the header gives the as-of day.
+- **As-of day:** each configured platform's own latest day with loaded data is found independently; the digest's as-of day is the minimum of those. That single date drives every combined figure and the per-app table's day columns, so Apple and Play lagging by different amounts never produces mismatched totals. Phase 3 compares the 7 days ending on it with the 7 days before; a separate "yesterday" figure was simplified out for now.
+- Contents: 7-day totals vs the previous 7 days, a lifetime installs total since this database's first collected day, a per-app installs table (below), proceeds listed per currency (no conversion; a converted total appears only when `config.toml`'s `[digest]` section sets fixed rates and a display currency — no new outbound calls), vitals warnings, and data freshness per source.
   - A configured platform that has never loaded data (e.g. Play bucket access still pending) shows as `—`, never `0`, and is left out of the combined totals and trend; its apps aren't listed. This is judged per platform, never against the shared as-of window, so a stalled platform can't make the other one read `—`. Vitals warnings cover every app, including collapsed ones and apps of a platform shown as `—`, since crash and ANR rates come from the Reporting API, not the installs reports. Apps with no installs or proceeds in either week collapse into one "+N more apps" line. Two apps sharing a name on one platform show their store ID. Vitals collected without any values from Google (common below its minimum user count) read `vitals ok (no data from Google)`.
+  - **Per-app installs table:** one row per listed app; columns are the 7 days ending on the as-of day, that day's calendar month to date, and lifetime installs. The latest day, the month and lifetime columns are highlighted (bold with a light tint in HTML; wrapped in `*` in plain text, which is an aligned monospace table). Same metric scope as the headline figures: `installs` only, never `redownloads`, and Android reads only its `ALL` row. In hosted mode a paired app's row sums every column across the pair. Under the app's name, small grey lines carry what used to sit beside it: proceeds per currency (only when non-zero), Android crash/ANR rates, and iOS impressions and page views.
   - **Lifetime installs:** the same per-platform breakdown and `—`-for-unavailable rule as the 7-day Installs line, but unwindowed — every `installs` row either source has ever written (never `redownloads`, same metric scope as the weekly figure), capped only by how far back each source's own data actually goes: Apple's report retention tops a backfill out at 365 days, while Play's bucket goes back to each app's launch. No week-over-week trend, since there's no prior "lifetime" to compare against. Account-wide, like every other combined figure, so a hidden app's installs still count (Storage: hiding "still counts in combined totals and trends").
 - Local mode's `apps` table has the same `pair_key` column as hosted mode (Storage) — the schema doesn't differ — but local mode's CLI never writes it, so an iOS and Android build of the same app are always two separate rows there, never merged.
 - Optional weekly summary email and optional CSV attachment of the week's data.
@@ -476,6 +478,19 @@ not part of the original roadmap, but it joins 6a in completing v0.4 now that 6b
    - *Done when:* the lifetime total appears in the digest and on both dashboard pages,
      matches a manual sum of `daily_metrics` for a test account, and is per-app on the App
      page, combined on Overview.
+
+**Digest table → v0.5** (not a numbered phase — a follow-up requested after the first live
+digests, like Lifetime installs above)
+   - The digest's subject and header carry the date it was generated, not the as-of day: a
+     Play bucket stalled at Sep 25 had titled an Oct 6 email "Fri Sep 25". The as-of day
+     moves to a "Data through" line.
+   - The 30-day sparkline images (and `core/charts.py`, the PNG writer behind them) are
+     removed. Per-app rows become a table: the last 7 days, this month and lifetime
+     installs, with the latest day, month and lifetime highlighted. No new source, config
+     or secret; every figure comes from `daily_metrics` as before.
+   - *Done when:* the email has no inline images, its title shows the generation date, and
+     each listed app's row shows its 7 days, month total and lifetime total, matching a
+     manual sum of `daily_metrics` for a test account.
 
 For every phase: parser unit tests against scrubbed sample reports in `tests/fixtures/`, no network calls in tests, and LogicFT's own FT apps as the live dogfood account.
 
