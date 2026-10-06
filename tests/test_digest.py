@@ -66,6 +66,12 @@ AS_OF = date(2026, 9, 26)
 TODAY = date(2026, 9, 27)
 
 
+def _table_row(text: str, name: str) -> str:
+    """The plain-text per-app table row for ``name``, e.g. "deskFT (iOS)"."""
+    (row,) = [line for line in text.splitlines() if line.startswith(f"  {name} ")]
+    return row
+
+
 def _seed_basic(conn: sqlite3.Connection, ios_id: int, android_id: int) -> None:
     """One week (Sep 20-26) plus the previous week (Sep 13-19) of installs/proceeds."""
     for i in range(14):
@@ -135,7 +141,7 @@ def test_no_data_yet_returns_placeholder_digest(conn: sqlite3.Connection) -> Non
     result = digest.build_digest(conn, _cfg(), today=TODAY)
     assert result.as_of is None
     assert "No data has been collected yet" in result.text
-    assert result.images == []
+    assert result.today is None
 
 
 # -- installs / week-over-week --------------------------------------------------------------
@@ -690,25 +696,22 @@ def test_same_name_apps_on_both_platforms_are_not_merged(conn: sqlite3.Connectio
     _log(conn, "play_installs", "2026-09-01")
 
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    assert "SharedName (iOS): 10 installs" in result.text
-    assert "SharedName (Android): 7 installs" in result.text
+    ios_row = _table_row(result.text, "SharedName (iOS)")
+    android_row = _table_row(result.text, "SharedName (Android)")
+    assert ios_row.split()[-3:] == ["*10*", "*10*", "*10*"]  # day, month, lifetime
+    assert android_row.split()[-3:] == ["*7*", "*7*", "*7*"]
     assert result.text.count("SharedName (") == 2  # two distinct per-app rows, never merged
-    assert len(result.images) == 2
 
 
-def test_html_has_one_cid_image_per_app(
-    conn: sqlite3.Connection, ios_id: int, android_id: int
-) -> None:
+def test_email_has_no_images(conn: sqlite3.Connection, ios_id: int, android_id: int) -> None:
     _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
     _android_installs_day(conn, AS_OF.isoformat(), android_id, installs=1)
     _log(conn, "apple_sales", AS_OF.isoformat())
     _log(conn, "play_installs", "2026-09-01")
 
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    assert len(result.images) == 2
-    for cid, png in result.images:
-        assert f'cid:{cid}"' in result.html
-        assert png.startswith(b"\x89PNG")
+    assert "<img" not in result.html
+    assert "cid:" not in result.html
 
 
 def test_top_app_by_installs(conn: sqlite3.Connection, ios_id: int, android_id: int) -> None:
@@ -739,15 +742,14 @@ def test_to_email_message_structure(conn: sqlite3.Connection, ios_id: int, andro
         to_addrs=["you@example.com"],
     )
     msg = digest.to_email_message(result, email_cfg)
-    assert msg["Subject"] == "Storepulse · Sat Sep 26"
+    # Titled with the day it was generated, not the (older) as-of day.
+    assert msg["Subject"] == "Storepulse · Sun Sep 27"
     assert msg["To"] == "you@example.com"
-    plain, html_related = msg.get_payload(0), msg.get_payload(1)
+    plain, html = msg.get_payload(0), msg.get_payload(1)
     assert plain.get_content_type() == "text/plain"
     assert plain.get_content() == result.text
-    image_parts = [p for p in html_related.walk() if p.get_content_type() == "image/png"]
-    assert len(image_parts) == 2
-    for cid, _png in result.images:
-        assert any(p["Content-ID"] == f"<{cid}>" for p in image_parts)
+    assert html.get_content_type() == "text/html"
+    assert not [p for p in msg.walk() if p.get_content_maintype() == "image"]
 
 
 def test_subject_has_no_date_when_no_data(conn: sqlite3.Connection) -> None:
@@ -775,6 +777,9 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
     only in the current week (previous week's proceeds are $0 android + $105 apple = $105,
     so $125 vs $105 is +19%). Top app is deskFT (70 > 56). billFT's 28d crash rate (2.0%)
     is above the 1.09% threshold; its ANR rate (0.1%) is not.
+
+    Only 14 days (Sep 13-26) are seeded, all in September, so the table's month and
+    lifetime columns both equal the 14-day totals: 140 (iOS) and 112 (Android).
     """
     for i in range(14):
         d = (AS_OF - timedelta(days=i)).isoformat()
@@ -806,7 +811,8 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
 
     result = digest.build_digest(conn, _cfg(), today=TODAY)
     assert result.text == (
-        "Storepulse · Sat Sep 26\n"
+        "Storepulse · Sun Sep 27\n"
+        "Data through Sat Sep 26\n"
         "Installs  126 (+0% wk)   iOS 70 · Android 56\n"
         "Lifetime  252   iOS 140 · Android 112\n"
         "Proceeds  $125.00 (+19% wk)\n"
@@ -816,8 +822,11 @@ def test_exact_plain_text(conn: sqlite3.Connection, ios_id: int, android_id: int
         "Data      apple_sales ok · play_installs ok · vitals ok\n"
         "\n"
         "Apps\n"
-        "  deskFT (iOS): 70 installs, $105.00\n"
-        "  billFT (Android): 56 installs, $20.00\n"
+        "                    Sep 20  Sep 21  Sep 22  Sep 23  Sep 24  Sep 25  *Sep 26*  *Sep total*  *Lifetime*\n"  # noqa: E501
+        "  deskFT (iOS)          10      10      10      10      10      10      *10*        *140*       *140*\n"  # noqa: E501
+        "    $105.00\n"
+        "  billFT (Android)       8       8       8       8       8       8       *8*        *112*       *112*\n"  # noqa: E501
+        "    $20.00\n"
     )
 
 
@@ -856,7 +865,7 @@ def _email_like_account(conn: sqlite3.Connection) -> dict[str, int]:
 def test_platform_without_data_is_a_dash_not_zero(conn: sqlite3.Connection) -> None:
     _email_like_account(conn)
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    installs_line = result.text.splitlines()[1]
+    installs_line = next(line for line in result.text.splitlines() if line.startswith("Installs"))
     assert installs_line == "Installs  29 (new)   iOS 29 · Android —"
     assert "Android —" in result.html
     # The unavailable platform's apps aren't listed as "0 installs"...
@@ -873,7 +882,8 @@ def test_unavailable_platform_is_left_out_of_the_trend(conn: sqlite3.Connection)
         _apple_day(conn, d, ios, installs=10.0 if i < 7 else 5.0, proceeds=0)
         _log(conn, "apple_sales", d)
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    assert result.text.splitlines()[1] == "Installs  70 (+100% wk)   iOS 70 · Android —"
+    installs_line = next(line for line in result.text.splitlines() if line.startswith("Installs"))
+    assert installs_line == "Installs  70 (+100% wk)   iOS 70 · Android —"
     assert "billFT" not in result.text  # not listed, and not counted as a quiet app
     assert "more app" not in result.text
 
@@ -896,23 +906,26 @@ def test_same_named_apps_show_their_store_id(conn: sqlite3.Connection) -> None:
     _apple_day(conn, AS_OF.isoformat(), ios, installs=1.0, proceeds=0)
     _log(conn, "apple_sales", AS_OF.isoformat())
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    assert "Bus Wise [com.jasonsb.busarrival] (Android): 3 installs" in result.text
-    assert "Bus Wise [com.logicftinc.buswise] (Android): 2 installs" in result.text
-    assert "  Bus Wise (iOS): 1 install," in result.text
+    # Each row ends with its latest-day, month and lifetime installs.
+    a_row = _table_row(result.text, "Bus Wise [com.jasonsb.busarrival] (Android)")
+    b_row = _table_row(result.text, "Bus Wise [com.logicftinc.buswise] (Android)")
+    assert a_row.split()[-3:] == ["*3*", "*3*", "*3*"]
+    assert b_row.split()[-3:] == ["*2*", "*2*", "*2*"]
+    assert _table_row(result.text, "Bus Wise (iOS)").split()[-3:] == ["*1*", "*1*", "*1*"]
 
 
 def test_quiet_apps_collapse_into_one_line(conn: sqlite3.Connection) -> None:
     _email_like_account(conn)
     db.upsert_app(conn, "ios", "13", "Bus Wiser")
     result = digest.build_digest(conn, _cfg(), today=TODAY)
-    apps = result.text.split("Apps\n", 1)[1]
-    assert apps == (
-        "  echoFT (iOS): 28 installs, no proceeds\n"
-        "  libFT (iOS): 1 install, no proceeds\n"
-        "  +2 more apps with no installs or proceeds in either week\n"
-    )
+    apps = result.text.split("Apps\n", 1)[1].splitlines()
+    # A header, one row per listed app (no per-app "no proceeds" noise), then the collapse.
+    assert [line.split("(")[0].strip() for line in apps[1:3]] == ["echoFT", "libFT"]
+    assert len(apps) == 4
+    assert apps[-1] == "  +2 more apps with no installs or proceeds in either week"
+    assert "Bus Wise" not in "\n".join(apps[:3])
     assert "+2 more apps with no installs or proceeds in either week" in result.html
-    assert len(result.images) == 2  # sparklines only for the listed apps
+    assert result.html.count("<tr>") == 1 + 2 + 1  # header, two listed apps, the collapse
 
 
 def test_app_active_last_week_only_is_still_listed(conn: sqlite3.Connection) -> None:
@@ -923,7 +936,8 @@ def test_app_active_last_week_only_is_still_listed(conn: sqlite3.Connection) -> 
     _apple_day(conn, AS_OF.isoformat(), other, installs=1.0, proceeds=0)
     _log(conn, "apple_sales", AS_OF.isoformat())
     result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
-    assert "deskFT (iOS): 0 installs, no proceeds" in result.text
+    # Nothing in the last 7 days, but Sep 18 is in the same month and in the lifetime total.
+    assert _table_row(result.text, "deskFT (iOS)").split()[-3:] == ["*0*", "*5*", "*5*"]
     assert "more app" not in result.text
 
 
@@ -932,7 +946,7 @@ def test_singular_install(conn: sqlite3.Connection, ios_id: int) -> None:
     _log(conn, "apple_sales", AS_OF.isoformat())
     result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
     assert "Top app   deskFT 1 install\n" in result.text
-    assert "deskFT (iOS): 1 install, no proceeds" in result.text
+    assert _table_row(result.text, "deskFT (iOS)").split()[-3:] == ["*1*", "*1*", "*1*"]
     assert "1 installs" not in result.text + result.html
 
 
@@ -1012,4 +1026,113 @@ def test_stale_apple_does_not_make_android_a_dash(conn: sqlite3.Connection) -> N
     result = digest.build_digest(conn, _cfg(), today=TODAY)
     assert result.as_of == apple_last
     assert "Android —" not in result.text
-    assert result.text.splitlines()[1] == "Installs  14 (+0% wk)   iOS 14 · Android 0"
+    installs_line = next(line for line in result.text.splitlines() if line.startswith("Installs"))
+    assert installs_line == "Installs  14 (+0% wk)   iOS 14 · Android 0"
+
+
+# -- title date and the per-app installs table ------------------------------------------------
+
+
+def test_title_is_the_generation_date_not_the_as_of_day(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The regression: Play stalled at Sep 20 and the digest sent on Oct 6 was titled with
+    the stale as-of day, which read as the wrong date for an email received today."""
+    stalled, sent = date(2026, 9, 20), date(2026, 10, 6)
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    _android_installs_day(conn, stalled.isoformat(), android_id, installs=1)
+    _log(conn, "play_installs", "2026-09-01")
+
+    result = digest.build_digest(conn, _cfg(), today=sent)
+    assert result.as_of == stalled
+    lines = result.text.splitlines()
+    assert lines[0] == "Storepulse · Tue Oct 6"
+    assert lines[1] == "Data through Sun Sep 20"
+    assert "Storepulse · Tue Oct 6" in result.html
+    assert "Data through Sun Sep 20" in result.html
+
+
+def test_month_column_covers_only_the_as_of_months_days(
+    conn: sqlite3.Connection, ios_id: int
+) -> None:
+    """The 7 day columns straddle Sep/Oct, but the month column counts only Oct 1-2;
+    lifetime counts every day."""
+    as_of = date(2026, 10, 2)
+    for i in range(13):  # Sep 20 - Oct 2
+        d = (as_of - timedelta(days=i)).isoformat()
+        _apple_day(conn, d, ios_id, installs=3.0, proceeds=0)
+    _log(conn, "apple_sales", as_of.isoformat())
+
+    result = digest.build_digest(conn, _cfg(google=None), today=date(2026, 10, 3))
+    header = next(line for line in result.text.splitlines() if "*Oct total*" in line)
+    assert "Sep 26" in header and "*Oct 2*" in header  # Sep 26 - Oct 2
+    assert _table_row(result.text, "deskFT (iOS)").split()[-3:] == ["*3*", "*6*", "*39*"]
+    assert "Oct<br>total" in result.html
+
+
+def test_per_app_totals_exclude_redownloads(conn: sqlite3.Connection, ios_id: int) -> None:
+    d = AS_OF.isoformat()
+    db.replace_source_day(
+        conn,
+        "apple_sales",
+        d,
+        [
+            db.MetricRow(d, ios_id, "US", "installs", "", 10.0),
+            db.MetricRow(d, ios_id, "US", "redownloads", "", 500.0),
+        ],
+    )
+    _log(conn, "apple_sales", d)
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert _table_row(result.text, "deskFT (iOS)").split()[-3:] == ["*10*", "*10*", "*10*"]
+
+
+def test_android_per_app_totals_use_the_all_row_not_the_countries(
+    conn: sqlite3.Connection, android_id: int
+) -> None:
+    """play_installs writes a worldwide ALL row plus per-country rows; adding them up
+    would double-count."""
+    d = AS_OF.isoformat()
+    db.replace_source_range(
+        conn,
+        "play_installs",
+        d,
+        d,
+        [
+            db.MetricRow(d, android_id, "ALL", "installs", "", 10.0),
+            db.MetricRow(d, android_id, "US", "installs", "", 6.0),
+            db.MetricRow(d, android_id, "DE", "installs", "", 4.0),
+        ],
+    )
+    _log(conn, "play_installs", "2026-09-01")
+    result = digest.build_digest(conn, _cfg(apple=None), today=TODAY)
+    assert _table_row(result.text, "billFT (Android)").split()[-3:] == ["*10*", "*10*", "*10*"]
+
+
+def test_html_table_highlights_the_latest_day_month_and_lifetime(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _seed_basic(conn, ios_id, android_id)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    # Three highlighted cells in the header and in each of the two app rows.
+    assert result.html.count("background:#f1f5f9") == 3 * (1 + 2)
+    # One cell per day, then the month and lifetime, after the app's own cell.
+    assert result.html.count("<th ") == 1 + 7 + 2
+    assert result.html.count("<td ") == 2 * (1 + 7 + 2)
+    assert "<img" not in result.html
+
+
+def test_zero_days_are_dimmed_in_the_html_table(conn: sqlite3.Connection, ios_id: int) -> None:
+    other = db.upsert_app(conn, "ios", "2", "libFT")
+    _apple_day(conn, (AS_OF - timedelta(days=8)).isoformat(), ios_id, installs=5.0, proceeds=0)
+    _apple_day(conn, AS_OF.isoformat(), other, installs=1.0, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "color:#9ca3af" in result.html
+
+
+def test_app_without_proceeds_has_no_proceeds_line(conn: sqlite3.Connection, ios_id: int) -> None:
+    _apple_day(conn, AS_OF.isoformat(), ios_id, installs=1, proceeds=0)
+    _log(conn, "apple_sales", AS_OF.isoformat())
+    result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
+    assert "no proceeds" not in result.text + result.html

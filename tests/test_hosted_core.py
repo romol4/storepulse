@@ -338,26 +338,34 @@ def _seed_pair(conn: sqlite3.Connection) -> dict[str, int]:
     return ids
 
 
+def _row_totals(text: str, name: str) -> list[str]:
+    """A digest table row's last three cells: latest day, month and lifetime installs."""
+    (row,) = [line for line in text.splitlines() if line.startswith(f"  {name} ")]
+    return row.split()[-3:]
+
+
 def test_a_pair_is_one_digest_row_with_per_currency_money(conn: sqlite3.Connection) -> None:
     _seed_pair(conn)
     discovery.pair_apps(conn)
     result = digest.build_digest(conn, CFG, today=TODAY)
-    # 21 iOS + 28 Android installs; money summed per currency, never converted.
-    assert "  libFT (iOS + Android): 49 installs, €2.00, $7.00" in result.text
+    # 3 iOS + 4 Android installs a day; 21 + 28 over the week, which is also the whole
+    # month and lifetime here. Every column is summed across the pair.
+    assert _row_totals(result.text, "libFT (iOS + Android)") == ["*7*", "*49*", "*49*"]
+    # Money summed per currency, never converted, on the line under the app.
+    assert "    €2.00, $7.00\n" in result.text
     assert "(iOS)" not in result.text.replace("deskFT (iOS)", "")
     # Top app ranks the merged total (49), not deskFT's 35 or either platform alone.
     assert "Top app   libFT 49 installs" in result.text
     # Vitals stay per platform underneath the merged row.
     assert "libFT Android crash rate 2.0% ⚠" in result.text
     assert "crash — daily, 2.0% 28d" in result.html
-    assert len(result.images) == 2  # one sparkline per listed row
 
 
 def test_local_mode_never_merges(conn: sqlite3.Connection) -> None:
     _seed_pair(conn)  # no pair_apps call: local mode never writes pair_key
     result = digest.build_digest(conn, CFG, today=TODAY)
-    assert "libFT (iOS): 21 installs" in result.text
-    assert "libFT (Android): 28 installs" in result.text
+    assert _row_totals(result.text, "libFT (iOS)") == ["*3*", "*21*", "*21*"]
+    assert _row_totals(result.text, "libFT (Android)") == ["*4*", "*28*", "*28*"]
 
 
 def test_hidden_app_leaves_lists_but_stays_in_totals_and_warnings(
@@ -375,7 +383,7 @@ def test_display_name_replaces_the_store_name(conn: sqlite3.Connection) -> None:
     ids = _seed_pair(conn)
     db.set_app_display(conn, ids["2"], display_name="Desk", hidden=False)
     result = digest.build_digest(conn, CFG, today=TODAY)
-    assert "  Desk (iOS): 35 installs" in result.text
+    assert _row_totals(result.text, "Desk (iOS)") == ["*5*", "*35*", "*35*"]
 
 
 def test_claim_totp_step_accepts_each_step_once() -> None:
