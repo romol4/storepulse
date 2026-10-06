@@ -2,10 +2,12 @@
 
 As-of day (docs/SPEC.md): each *configured* platform's own latest loaded day is found
 independently, and the digest's as-of day is the minimum of those — the most
-conservative shared date. That single date drives the 7-day-vs-previous-7-day
-comparison, the per-app table's day columns, and every per-platform figure, so the
-combined totals and the table always describe the same window. The title shows the day
-the digest was generated instead, and a "Data through" line gives the as-of day.
+conservative shared date. That single date drives the 7-day-vs-previous-7-day comparison
+and every combined figure, so the totals always describe the same window. The per-app
+table is the exception: its last column is the *newest* platform's last day, and each
+app's cells stop at its own platform's last loaded day ("—" after it, never 0), so a
+lagging platform can't hide the other one's recent days. The title shows the day the
+digest was generated, and a "Data through" line gives each platform's last day.
 
 Local mode's ``apps`` table has no ``pair_key`` (that is a hosted-mode-only addition), so
 an iOS and Android build of the same app are not merged here: "top app" and the per-app
@@ -101,7 +103,12 @@ class AppRow:
     platform: str  # 'ios' or 'android'
     installs: float
     proceeds: dict[str, float]
-    month_installs: float = 0.0  # calendar month of the as-of day, up to and including it
+    # The table's 7 days, oldest first, ending on its last column. None = this app's
+    # platform hasn't loaded that day yet (shown as "—", never as a real 0).
+    day_installs: list[float | None] = field(default_factory=list)
+    # The table's last day's calendar month, up to the platform's last loaded day; None
+    # when the platform has loaded nothing in that month yet.
+    month_installs: float | None = None
     lifetime_installs: float = 0.0
     crash_rate: float | None = None
     crash_rate_28d: float | None = None
@@ -113,7 +120,6 @@ class AppRow:
     prev_installs: float = 0.0
     hidden: bool = False
     pair_key: str | None = None
-    series: list[float] = field(default_factory=list)  # daily installs, oldest first
 
     @property
     def platform_label(self) -> str:
@@ -121,8 +127,9 @@ class AppRow:
 
     @property
     def active(self) -> bool:
-        """Anything to show for this app in either week."""
-        return bool(self.installs or self.prev_installs or self.proceeds)
+        """Anything to show for this app in either week, or in the table's days (a
+        platform that is ahead of the shared as-of day can have newer installs)."""
+        return bool(self.installs or self.prev_installs or self.proceeds or any(self.day_installs))
 
 
 @dataclass
@@ -135,8 +142,10 @@ class Digest:
 
 @dataclass
 class _Context:
-    as_of: date
+    as_of: date  # the oldest platform's last day: the weekly figures end here
     today: date
+    table_end: date  # the newest platform's last day: the table's last column
+    platform_days: dict[str, date]  # each platform's own last loaded day
     cfg: config.Config
     ios_installs: float
     android_installs: float
@@ -267,19 +276,27 @@ def _platform_as_of(conn: sqlite3.Connection, source: str) -> date | None:
     return date.fromisoformat(max(candidates)) if candidates else None
 
 
+def _platform_as_ofs(conn: sqlite3.Connection, cfg: config.Config) -> dict[str, date]:
+    """Each configured platform's own latest loaded day, keyed "ios" / "android". A
+    platform with no data yet is left out."""
+    found: dict[str, date] = {}
+    for platform, configured, source in (
+        ("ios", cfg.apple, apple_sales.SOURCE),
+        ("android", cfg.google, play_installs.SOURCE),
+    ):
+        if configured is None:
+            continue
+        day = _platform_as_of(conn, source)
+        if day is not None:
+            found[platform] = day
+    return found
+
+
 def compute_as_of(conn: sqlite3.Connection, cfg: config.Config) -> date | None:
     """The minimum of each configured platform's latest loaded day, or None if neither
     configured platform has any data yet."""
-    candidates: list[date] = []
-    if cfg.apple is not None:
-        found = _platform_as_of(conn, apple_sales.SOURCE)
-        if found is not None:
-            candidates.append(found)
-    if cfg.google is not None:
-        found = _platform_as_of(conn, play_installs.SOURCE)
-        if found is not None:
-            candidates.append(found)
-    return min(candidates) if candidates else None
+    found = _platform_as_ofs(conn, cfg)
+    return min(found.values()) if found else None
 
 
 def _window_total(
@@ -419,30 +436,55 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
     return float(row["value"]) if row is not None else None
 
 
-def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> list[AppRow]:
+def _build_app_rows(
+    conn: sqlite3.Connection,
+    as_of: date,
+    window: Window,
+    table_end: date,
+    platform_days: dict[str, date],
+) -> list[AppRow]:
     """One row per app (never merged here; see _merge_pairs). A user's display name
-    replaces the store name when set (hosted mode's Settings)."""
+    replaces the store name when set (hosted mode's Settings).
+
+    ``installs`` / ``prev_installs`` are the shared as-of windows, like every combined
+    figure. The table's day and month cells run to ``table_end`` instead, but only as far
+    as the app's own platform has loaded: later cells are None, not 0."""
     apps = conn.execute(
         "SELECT id, name, display_name, platform, store_id, hidden, pair_key FROM apps "
         "ORDER BY name"
     ).fetchall()
-    month_window = Window(as_of.replace(day=1), as_of)
+    ahead = (table_end - as_of).days
+    month_start = table_end.replace(day=1)
+    first_day = table_end - timedelta(days=_WINDOW_DAYS - 1)
     rows: list[AppRow] = []
     for record in apps:
         app_id, platform = int(record["id"]), str(record["platform"])
         name = str(record["display_name"] or record["name"])
         source = apple_sales.SOURCE if platform == "ios" else play_installs.SOURCE
         all_only = platform == "android"
-        # The daily series ends on as_of, so it already holds both 7-day windows;
-        # slice it instead of querying each window again.
-        series = _daily_series(conn, source, app_id, all_only=all_only, end=as_of)
-        installs = sum(series[-_WINDOW_DAYS:])
-        prev_installs = sum(series[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
+        last_day = platform_days.get(platform, table_end)  # this platform's last loaded day
+        # One daily series, ending on table_end, holds both shared 7-day windows (it
+        # starts early enough to cover them) and the table's days; slice it instead of
+        # querying each window again.
+        series = _daily_series(
+            conn, source, app_id, all_only=all_only, end=table_end, days=_SERIES_DAYS + ahead
+        )
+        shared = series[: len(series) - ahead]  # ends on as_of
+        installs = sum(shared[-_WINDOW_DAYS:])
+        prev_installs = sum(shared[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
+        day_installs: list[float | None] = [
+            value if first_day + timedelta(days=i) <= last_day else None
+            for i, value in enumerate(series[-_WINDOW_DAYS:])
+        ]
+        month_window = Window(month_start, min(table_end, last_day))
+        month_installs: float | None = None
         if platform == "ios":
-            month_installs = _ios_installs(conn, month_window, app_id)
+            if last_day >= month_start:
+                month_installs = _ios_installs(conn, month_window, app_id)
             lifetime_installs = _ios_lifetime_installs(conn, app_id)
         else:
-            month_installs = _android_installs(conn, month_window, app_id)
+            if last_day >= month_start:
+                month_installs = _android_installs(conn, month_window, app_id)
             lifetime_installs = _android_lifetime_installs(conn, app_id)
         proceeds = (
             _window_by_currency(conn, apple_sales.SOURCE, "proceeds", window, app_id=app_id)
@@ -455,13 +497,13 @@ def _build_app_rows(conn: sqlite3.Connection, as_of: date, window: Window) -> li
             platform=platform,
             installs=installs,
             proceeds=proceeds,
+            day_installs=day_installs,
             month_installs=month_installs,
             lifetime_installs=lifetime_installs,
             store_id=str(record["store_id"]),
             prev_installs=prev_installs,
             hidden=bool(record["hidden"]),
             pair_key=record["pair_key"],
-            series=series,
         )
         if platform == "android":
             row.crash_rate = _latest_vitals(conn, app_id, "crash_rate", as_of)
@@ -518,7 +560,6 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
         done.add(row.pair_key or "")
         ios = next(m for m in members if m.platform == "ios")
         android = next(m for m in members if m.platform == "android")
-        series = [a + b for a, b in zip(ios.series, android.series, strict=True)]
         merged.append(
             AppRow(
                 app_id=ios.app_id,
@@ -526,7 +567,13 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
                 platform="paired",
                 installs=ios.installs + android.installs,
                 proceeds=_merge_currency(ios.proceeds, android.proceeds),
-                month_installs=ios.month_installs + android.month_installs,
+                # A day one member hasn't loaded stays "—" for the pair too: adding only
+                # the other member would understate it without saying so.
+                day_installs=[
+                    _add_known(a, b)
+                    for a, b in zip(ios.day_installs, android.day_installs, strict=True)
+                ],
+                month_installs=_add_known(ios.month_installs, android.month_installs),
                 lifetime_installs=ios.lifetime_installs + android.lifetime_installs,
                 crash_rate=android.crash_rate,
                 crash_rate_28d=android.crash_rate_28d,
@@ -537,11 +584,14 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
                 store_id=f"{ios.store_id} + {android.store_id}",
                 prev_installs=ios.prev_installs + android.prev_installs,
                 pair_key=ios.pair_key,
-                series=series,
             )
         )
     merged.sort(key=lambda r: (-r.installs, r.name))
     return merged
+
+
+def _add_known(a: float | None, b: float | None) -> float | None:
+    return None if a is None or b is None else a + b
 
 
 def _platform_has_data(conn: sqlite3.Connection, platform: str) -> bool:
@@ -817,26 +867,49 @@ class _Head(NamedTuple):
     highlight: bool
 
 
-def _table_heads(as_of: date) -> list[_Head]:
-    """The 7 days ending on the as-of day, then the as-of day's month and lifetime. The
+def _table_heads(table_end: date) -> list[_Head]:
+    """The 7 days ending on the table's last day, then that day's month and lifetime. The
     latest day, the month and lifetime are the highlighted columns."""
     heads = []
     for i in range(_WINDOW_DAYS):
-        day = as_of - timedelta(days=_WINDOW_DAYS - 1 - i)
+        day = table_end - timedelta(days=_WINDOW_DAYS - 1 - i)
         heads.append(
             _Head(
                 _short_date(day), _WEEKDAYS[day.weekday()], _short_date(day), i == _WINDOW_DAYS - 1
             )
         )
-    month = _MONTHS_ABBR[as_of.month - 1]
+    month = _MONTHS_ABBR[table_end.month - 1]
     heads.append(_Head(f"{month} total", month, "total", True))
     heads.append(_Head("Lifetime", "Lifetime", "total", True))
     return heads
 
 
-def _row_cells(row: AppRow) -> list[float]:
-    """The values under _table_heads, in the same order."""
-    return [*row.series[-_WINDOW_DAYS:], row.month_installs, row.lifetime_installs]
+def _row_cells(row: AppRow) -> list[float | None]:
+    """The values under _table_heads, in the same order. None = not loaded yet."""
+    return [*row.day_installs, row.month_installs, row.lifetime_installs]
+
+
+def _cell_text(value: float | None) -> str:
+    return _NO_DATA if value is None else f"{value:,.0f}"
+
+
+def _data_through_text(ctx: _Context) -> str:
+    """One date while the platforms agree (or only one has data), else each platform's
+    own last loaded day."""
+    if len(set(ctx.platform_days.values())) <= 1:
+        return _format_header_date(ctx.as_of)
+    return f" {_DOT} ".join(
+        f"{_PLATFORM_LABELS[platform]} {_format_header_date(ctx.platform_days[platform])}"
+        for platform in ("ios", "android")
+        if platform in ctx.platform_days
+    )
+
+
+def _weekly_note(ctx: _Context) -> str:
+    """Said only when the weekly figures end earlier than the table does."""
+    if ctx.table_end == ctx.as_of:
+        return ""
+    return f"Weekly totals cover the 7 days to {_format_header_date(ctx.as_of)}"
 
 
 def _proceeds_text(row: AppRow) -> str:
@@ -855,7 +928,7 @@ def _analytics_text(row: AppRow) -> str:
 def _text_table(ctx: _Context) -> list[str]:
     """The per-app table as aligned monospace text. Highlighted columns are wrapped in
     asterisks, since plain text can't bold."""
-    heads = _table_heads(ctx.as_of)
+    heads = _table_heads(ctx.table_end)
 
     def cell(text: str, highlight: bool) -> str:
         return f"*{text}*" if highlight else text
@@ -865,7 +938,7 @@ def _text_table(ctx: _Context) -> list[str]:
         (
             f"{row.name} ({row.platform_label})",
             [
-                cell(f"{value:,.0f}", head.highlight)
+                cell(_cell_text(value), head.highlight)
                 for value, head in zip(_row_cells(row), heads, strict=True)
             ],
         )
@@ -890,8 +963,10 @@ def _text_table(ctx: _Context) -> list[str]:
 def _render_text(ctx: _Context) -> str:
     lines = [
         f"Storepulse {_DOT} {_format_header_date(ctx.today)}",
-        f"Data through {_format_header_date(ctx.as_of)}",
+        f"Data through {_data_through_text(ctx)}",
     ]
+    if note := _weekly_note(ctx):
+        lines.append(note)
 
     combined, prev_combined, breakdown_parts = _installs_summary(ctx)
     breakdown = f"   {f' {_DOT} '.join(breakdown_parts)}" if breakdown_parts else ""
@@ -984,7 +1059,7 @@ def _html_app_extras(row: AppRow) -> str:
 def _html_table(ctx: _Context) -> str:
     if not (ctx.app_rows or ctx.quiet_apps):
         return ""
-    heads = _table_heads(ctx.as_of)
+    heads = _table_heads(ctx.table_end)
     header = [f'<th style="{_TH}text-align:left;">App</th>']
     for head in heads:
         style = f"{_TH}text-align:right;{_HIGHLIGHT if head.highlight else ''}"
@@ -997,7 +1072,7 @@ def _html_table(ctx: _Context) -> str:
         ]
         for value, head in zip(_row_cells(row), heads, strict=True):
             style = f"{_TD_NUM}{_HIGHLIGHT if head.highlight else ''}{'' if value else _ZERO}"
-            cells.append(f'<td style="{style}">{value:,.0f}</td>')
+            cells.append(f'<td style="{style}">{_cell_text(value)}</td>')
         rows.append(f"<tr>{''.join(cells)}</tr>")
     if ctx.quiet_apps:
         rows.append(
@@ -1047,10 +1122,15 @@ def _render_html(ctx: _Context) -> str:
             f"{_installs_text(ctx.top_app.installs)}</p>"
         )
 
+    weekly_note_html = ""
+    if note := _weekly_note(ctx):
+        weekly_note_html = f'<p style="color:#666;margin:4px 0;font-size:13px;">{note}</p>'
+
     return (
         '<div style="font-family:sans-serif;color:#111;max-width:720px;">'
         f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.today)}</h2>'
-        f'<p style="color:#666;margin:4px 0;">Data through {_format_header_date(ctx.as_of)}</p>'
+        f'<p style="color:#666;margin:4px 0;">Data through {_data_through_text(ctx)}</p>'
+        f"{weekly_note_html}"
         f'<p style="font-size:18px;margin:4px 0;">Installs: {combined:.0f}'
         f"{_trend_suffix(combined, prev_combined)}{breakdown}</p>"
         f'<p style="color:#666;margin:4px 0;">Lifetime installs: {lifetime_combined:,.0f}'
@@ -1088,9 +1168,14 @@ def build_digest(
     """``dashboard_url`` (hosted mode) adds a link to the dashboard (docs/SPEC.md,
     Outputs: "In hosted mode the email links to the dashboard")."""
     today = today if today is not None else apple_sales.pacific_today()
-    as_of = compute_as_of(conn, cfg)
-    if as_of is None:
+    platform_days = _platform_as_ofs(conn, cfg)
+    if not platform_days:
         return _empty_digest()
+    # Combined figures end on the oldest platform's last day, so Apple and Play lagging by
+    # different amounts never produces mismatched totals. The table's last column is the
+    # newest platform's last day; each app's cells stop at its own platform's.
+    as_of = min(platform_days.values())
+    table_end = max(platform_days.values())
 
     window = Window(as_of - timedelta(days=_WINDOW_DAYS - 1), as_of)
     prev_window = Window(
@@ -1102,7 +1187,7 @@ def build_digest(
         for platform, configured in (("ios", cfg.apple), ("android", cfg.google))
         if configured is not None and not _platform_has_data(conn, platform)
     )
-    all_rows = _build_app_rows(conn, as_of, window)
+    all_rows = _build_app_rows(conn, as_of, window, table_end, platform_days)
     # Listed: not hidden (docs/SPEC.md, Storage: hidden apps leave every list but still
     # count in totals and warnings), and not on a platform without data (the Data line
     # says why). Pairs merge into one row; apps with nothing in either week collapse
@@ -1113,6 +1198,8 @@ def build_digest(
     ctx = _Context(
         as_of=as_of,
         today=today,
+        table_end=table_end,
+        platform_days=platform_days,
         cfg=cfg,
         ios_installs=_ios_installs(conn, window),
         android_installs=_android_installs(conn, window),

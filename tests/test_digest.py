@@ -1048,9 +1048,10 @@ def test_title_is_the_generation_date_not_the_as_of_day(
     assert result.as_of == stalled
     lines = result.text.splitlines()
     assert lines[0] == "Storepulse · Tue Oct 6"
-    assert lines[1] == "Data through Sun Sep 20"
+    assert lines[1] == "Data through iOS Sat Sep 26 · Android Sun Sep 20"
+    assert lines[2] == "Weekly totals cover the 7 days to Sun Sep 20"
     assert "Storepulse · Tue Oct 6" in result.html
-    assert "Data through Sun Sep 20" in result.html
+    assert "Data through iOS Sat Sep 26 · Android Sun Sep 20" in result.html
 
 
 def test_month_column_covers_only_the_as_of_months_days(
@@ -1136,3 +1137,109 @@ def test_app_without_proceeds_has_no_proceeds_line(conn: sqlite3.Connection, ios
     _log(conn, "apple_sales", AS_OF.isoformat())
     result = digest.build_digest(conn, _cfg(google=None), today=TODAY)
     assert "no proceeds" not in result.text + result.html
+
+
+# -- platforms on different days: the table runs to the newest, "—" after each one's last ------
+
+
+def _seed_platforms(
+    conn: sqlite3.Connection,
+    ios_id: int,
+    android_id: int,
+    *,
+    apple_last: date,
+    play_last: date,
+    start: date = date(2026, 9, 20),
+) -> None:
+    """iOS installs 2 a day and Android 3 a day, from ``start`` to each platform's own last
+    loaded day."""
+    for i in range((apple_last - start).days + 1):
+        _apple_day(conn, (start + timedelta(days=i)).isoformat(), ios_id, installs=2.0, proceeds=0)
+    for i in range((play_last - start).days + 1):
+        _android_installs_day(conn, (start + timedelta(days=i)).isoformat(), android_id, 3.0)
+    _log(conn, "apple_sales", apple_last.isoformat())
+    _log(conn, "play_installs", "2026-09-01")
+
+
+def _cells(text: str, name: str) -> list[str]:
+    """A table row's nine cells: the 7 days, the month, lifetime."""
+    return _table_row(text, name).split()[-9:]
+
+
+def test_table_runs_to_the_newest_platform_and_dashes_the_lagging_one(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _seed_platforms(
+        conn, ios_id, android_id, apple_last=date(2026, 10, 5), play_last=date(2026, 10, 2)
+    )
+    result = digest.build_digest(conn, _cfg(), today=date(2026, 10, 6))
+
+    header = next(line for line in result.text.splitlines() if "*Oct total*" in line)
+    assert "Sep 29" in header and "*Oct 5*" in header
+    # iOS has every day through Oct 5. Android stops at its own last day, Oct 2.
+    assert _cells(result.text, "deskFT (iOS)") == [*["2"] * 6, "*2*", "*10*", "*32*"]
+    assert _cells(result.text, "billFT (Android)") == [
+        *["3"] * 4,
+        "—",
+        "—",
+        "*—*",
+        "*6*",  # Oct 1-2 only: the days it has
+        "*39*",
+    ]
+    assert ">—</td>" in result.html
+
+
+def test_header_and_weekly_totals_name_each_platforms_last_day(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _seed_platforms(
+        conn, ios_id, android_id, apple_last=date(2026, 10, 5), play_last=date(2026, 10, 2)
+    )
+    result = digest.build_digest(conn, _cfg(), today=date(2026, 10, 6))
+    lines = result.text.splitlines()
+    assert lines[1] == "Data through iOS Mon Oct 5 · Android Fri Oct 2"
+    assert lines[2] == "Weekly totals cover the 7 days to Fri Oct 2"
+    assert "Weekly totals cover the 7 days to Fri Oct 2" in result.html
+    # The combined figures stay on the shared (older) day, Sep 26 - Oct 2, so they compare
+    # like with like: 7 days x 2 iOS and 7 days x 3 Android.
+    installs_line = next(line for line in lines if line.startswith("Installs"))
+    assert "iOS 14 · Android 21" in installs_line
+
+
+def test_no_weekly_note_when_the_platforms_agree(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    _seed_basic(conn, ios_id, android_id)
+    result = digest.build_digest(conn, _cfg(), today=TODAY)
+    assert result.text.splitlines()[1] == "Data through Sat Sep 26"
+    assert "Weekly totals" not in result.text + result.html
+
+
+def test_lagging_platform_with_nothing_this_month_dashes_the_month_but_keeps_lifetime(
+    conn: sqlite3.Connection, ios_id: int, android_id: int
+) -> None:
+    """The live case: Play's last day is Sep 25 while Apple has data through Oct 5."""
+    _seed_platforms(
+        conn, ios_id, android_id, apple_last=date(2026, 10, 5), play_last=date(2026, 9, 25)
+    )
+    result = digest.build_digest(conn, _cfg(), today=date(2026, 10, 6))
+    # Still listed (it has installs in the shared week), with no day or month to show, and
+    # its lifetime total (Sep 20-25, 3 a day) intact.
+    assert _cells(result.text, "billFT (Android)") == [*["—"] * 6, "*—*", "*—*", "*18*"]
+    assert _cells(result.text, "deskFT (iOS)")[-3:] == ["*2*", "*10*", "*32*"]
+
+
+def test_app_with_installs_only_past_the_shared_day_is_still_listed(
+    conn: sqlite3.Connection, android_id: int
+) -> None:
+    """Apple is ahead of Play, so an iOS app whose only installs fall after the shared
+    as-of day has nothing in either week, but plenty in the table: it must not be
+    collapsed into "+N more apps"."""
+    ios = db.upsert_app(conn, "ios", "1", "newFT")
+    _android_installs_day(conn, "2026-09-25", android_id, installs=1.0)
+    _log(conn, "play_installs", "2026-09-01")
+    _apple_day(conn, "2026-10-03", ios, installs=4.0, proceeds=0)
+    _log(conn, "apple_sales", "2026-10-03")
+    result = digest.build_digest(conn, _cfg(), today=date(2026, 10, 6))
+    assert _cells(result.text, "newFT (iOS)")[-3:] == ["*4*", "*4*", "*4*"]
+    assert "more app" not in result.text
