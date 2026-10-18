@@ -45,7 +45,7 @@ web = [
 dev = [
     "mypy>=2.3,<3",
     "pytest>=9.1,<10",
-    "ruff>=0.16,<0.17",
+    "ruff>=0.16,<0.18",
 ]
 
 [project.scripts]

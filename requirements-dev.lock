@@ -104,7 +104,7 @@ python-multipart==0.0.32
     # via storepulse (pyproject.toml)
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
-ruff==0.16.9
+ruff==0.17.1
     # via storepulse (pyproject.toml)
 secretstorage==3.5.0 ; sys_platform == 'linux'
     # via keyring
