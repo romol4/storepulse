@@ -44,9 +44,14 @@ _APPROX = "≈"
 _NO_DATA = "—"
 
 _WINDOW_DAYS = 7
-# _build_app_rows slices both 7-day windows out of one daily series: the last 7 values
-# are the table's day columns, the 7 before them the previous week for the trend.
-_SERIES_DAYS = 2 * _WINDOW_DAYS
+# The per-app table's day columns, and its calendar months: the last day's month and the
+# full months before it.
+_TABLE_DAYS = 10
+_TABLE_MONTHS = 3
+# _build_app_rows slices both 7-day windows and the table's days out of one daily series:
+# its last _TABLE_DAYS values are the day columns, and the 14 ending on the shared as-of
+# day are the week and the previous week for the trend.
+_SERIES_DAYS = max(2 * _WINDOW_DAYS, _TABLE_DAYS)
 _LABEL_WIDTH = 10
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -103,12 +108,13 @@ class AppRow:
     platform: str  # 'ios' or 'android'
     installs: float
     proceeds: dict[str, float]
-    # The table's 7 days, oldest first, ending on its last column. None = this app's
+    # The table's 10 days, oldest first, ending on its last column. None = this app's
     # platform hasn't loaded that day yet (shown as "—", never as a real 0).
     day_installs: list[float | None] = field(default_factory=list)
-    # The table's last day's calendar month, up to the platform's last loaded day; None
-    # when the platform has loaded nothing in that month yet.
-    month_installs: float | None = None
+    # The table's months, oldest first, each up to the platform's last loaded day. None =
+    # the platform has loaded nothing in that month yet, or (an earlier month) its data
+    # doesn't reach back to the month's first day; see _month_loaded.
+    month_installs: list[float | None] = field(default_factory=list)
     lifetime_installs: float = 0.0
     crash_rate: float | None = None
     crash_rate_28d: float | None = None
@@ -292,6 +298,25 @@ def _platform_as_ofs(conn: sqlite3.Connection, cfg: config.Config) -> dict[str, 
     return found
 
 
+def _platform_first_days(conn: sqlite3.Connection) -> dict[str, date]:
+    """Each platform's earliest collected day, keyed "ios" / "android": the earlier of
+    daily_metrics' first day and ingest_log's first 'ok' report_date (Apple logs a
+    zero-sales day without writing rows; a monthly source's report_date is the first day
+    of the month its file covers). A platform that has collected nothing is left out."""
+    found: dict[str, date] = {}
+    for platform, source in (("ios", apple_sales.SOURCE), ("android", play_installs.SOURCE)):
+        row = conn.execute(
+            "SELECT MIN(d) AS d FROM ("
+            "SELECT MIN(date) AS d FROM daily_metrics WHERE source = ? "
+            "UNION ALL "
+            "SELECT MIN(report_date) FROM ingest_log WHERE source = ? AND status = 'ok')",
+            (source, source),
+        ).fetchone()
+        if row["d"] is not None:
+            found[platform] = date.fromisoformat(str(row["d"]))
+    return found
+
+
 def compute_as_of(conn: sqlite3.Connection, cfg: config.Config) -> date | None:
     """The minimum of each configured platform's latest loaded day, or None if neither
     configured platform has any data yet."""
@@ -436,12 +461,33 @@ def _latest_vitals(conn: sqlite3.Connection, app_id: int, metric: str, as_of: da
     return float(row["value"]) if row is not None else None
 
 
+def _table_months(table_end: date) -> list[Window]:
+    """The table's calendar months, oldest first: the full months before the table's last
+    day's month, then that month up to the last day."""
+    months = [Window(table_end.replace(day=1), table_end)]
+    while len(months) < _TABLE_MONTHS:
+        end = months[0].start - timedelta(days=1)
+        months.insert(0, Window(end.replace(day=1), end))
+    return months
+
+
+def _month_loaded(month: Window, first_day: date | None, last_day: date, *, current: bool) -> bool:
+    """Whether a platform has a total to show for a table month: it has loaded something
+    in it and, for an earlier month, its data reaches back to that month's first day, so
+    a month collected only in part (a first backfill loads 30 days) never reads as a low
+    total. The current month is a month to date anyway, so only the first rule applies."""
+    if last_day < month.start:
+        return False
+    return current or (first_day is not None and first_day <= month.start)
+
+
 def _build_app_rows(
     conn: sqlite3.Connection,
     as_of: date,
     window: Window,
     table_end: date,
     platform_days: dict[str, date],
+    first_days: dict[str, date],
 ) -> list[AppRow]:
     """One row per app (never merged here; see _merge_pairs). A user's display name
     replaces the store name when set (hosted mode's Settings).
@@ -454,8 +500,8 @@ def _build_app_rows(
         "ORDER BY name"
     ).fetchall()
     ahead = (table_end - as_of).days
-    month_start = table_end.replace(day=1)
-    first_day = table_end - timedelta(days=_WINDOW_DAYS - 1)
+    months = _table_months(table_end)
+    table_start = table_end - timedelta(days=_TABLE_DAYS - 1)
     rows: list[AppRow] = []
     for record in apps:
         app_id, platform = int(record["id"]), str(record["platform"])
@@ -473,19 +519,21 @@ def _build_app_rows(
         installs = sum(shared[-_WINDOW_DAYS:])
         prev_installs = sum(shared[-2 * _WINDOW_DAYS : -_WINDOW_DAYS])
         day_installs: list[float | None] = [
-            value if first_day + timedelta(days=i) <= last_day else None
-            for i, value in enumerate(series[-_WINDOW_DAYS:])
+            value if table_start + timedelta(days=i) <= last_day else None
+            for i, value in enumerate(series[-_TABLE_DAYS:])
         ]
-        month_window = Window(month_start, min(table_end, last_day))
-        month_installs: float | None = None
         if platform == "ios":
-            if last_day >= month_start:
-                month_installs = _ios_installs(conn, month_window, app_id)
+            window_installs = _ios_installs
             lifetime_installs = _ios_lifetime_installs(conn, app_id)
         else:
-            if last_day >= month_start:
-                month_installs = _android_installs(conn, month_window, app_id)
+            window_installs = _android_installs
             lifetime_installs = _android_lifetime_installs(conn, app_id)
+        month_installs: list[float | None] = [
+            window_installs(conn, Window(month.start, min(month.end, last_day)), app_id)
+            if _month_loaded(month, first_days.get(platform), last_day, current=month is months[-1])
+            else None
+            for month in months
+        ]
         proceeds = (
             _window_by_currency(conn, apple_sales.SOURCE, "proceeds", window, app_id=app_id)
             if platform == "ios"
@@ -573,7 +621,10 @@ def _merge_pairs(rows: list[AppRow]) -> list[AppRow]:
                     _add_known(a, b)
                     for a, b in zip(ios.day_installs, android.day_installs, strict=True)
                 ],
-                month_installs=_add_known(ios.month_installs, android.month_installs),
+                month_installs=[
+                    _add_known(a, b)
+                    for a, b in zip(ios.month_installs, android.month_installs, strict=True)
+                ],
                 lifetime_installs=ios.lifetime_installs + android.lifetime_installs,
                 crash_rate=android.crash_rate,
                 crash_rate_28d=android.crash_rate_28d,
@@ -868,25 +919,28 @@ class _Head(NamedTuple):
 
 
 def _table_heads(table_end: date) -> list[_Head]:
-    """The 7 days ending on the table's last day, then that day's month and lifetime. The
-    latest day, the month and lifetime are the highlighted columns."""
+    """The 10 days ending on the table's last day, then its months (that day's month and
+    the two before it) and lifetime. The latest day, the current month and lifetime are
+    the highlighted columns."""
     heads = []
-    for i in range(_WINDOW_DAYS):
-        day = table_end - timedelta(days=_WINDOW_DAYS - 1 - i)
+    for i in range(_TABLE_DAYS):
+        day = table_end - timedelta(days=_TABLE_DAYS - 1 - i)
         heads.append(
             _Head(
-                _short_date(day), _WEEKDAYS[day.weekday()], _short_date(day), i == _WINDOW_DAYS - 1
+                _short_date(day), _WEEKDAYS[day.weekday()], _short_date(day), i == _TABLE_DAYS - 1
             )
         )
-    month = _MONTHS_ABBR[table_end.month - 1]
-    heads.append(_Head(f"{month} total", month, "total", True))
+    months = _table_months(table_end)
+    for month in months:
+        name = _MONTHS_ABBR[month.start.month - 1]
+        heads.append(_Head(f"{name} total", name, "total", month is months[-1]))
     heads.append(_Head("Lifetime", "Lifetime", "total", True))
     return heads
 
 
 def _row_cells(row: AppRow) -> list[float | None]:
     """The values under _table_heads, in the same order. None = not loaded yet."""
-    return [*row.day_installs, row.month_installs, row.lifetime_installs]
+    return [*row.day_installs, *row.month_installs, row.lifetime_installs]
 
 
 def _cell_text(value: float | None) -> str:
@@ -1023,7 +1077,9 @@ def _html_escape(text: str) -> str:
 # Inline styles only: email clients strip <style> blocks and classes.
 _GREY_LINE = '<div style="color:#666;font-size:12px;">'
 _TD = "padding:6px 8px;border-bottom:1px solid #eee;"
-_TD_NUM = f"{_TD}text-align:right;white-space:nowrap;"
+# Narrower padding on the number columns, so the 10 days, 3 months and lifetime fit.
+_NUM = "padding-left:4px;padding-right:4px;text-align:right;white-space:nowrap;"
+_TD_NUM = f"{_TD}{_NUM}"
 _TH = "padding:6px 8px;border-bottom:2px solid #ddd;font-size:12px;font-weight:normal;color:#444;"
 _HIGHLIGHT = "background:#f1f5f9;font-weight:bold;"
 _ZERO = "color:#9ca3af;"
@@ -1062,7 +1118,7 @@ def _html_table(ctx: _Context) -> str:
     heads = _table_heads(ctx.table_end)
     header = [f'<th style="{_TH}text-align:left;">App</th>']
     for head in heads:
-        style = f"{_TH}text-align:right;{_HIGHLIGHT if head.highlight else ''}"
+        style = f"{_TH}{_NUM}{_HIGHLIGHT if head.highlight else ''}"
         header.append(f'<th style="{style}">{head.top}<br>{head.bottom}</th>')
     rows = [f"<tr>{''.join(header)}</tr>"]
     for row in ctx.app_rows:
@@ -1127,7 +1183,7 @@ def _render_html(ctx: _Context) -> str:
         weekly_note_html = f'<p style="color:#666;margin:4px 0;font-size:13px;">{note}</p>'
 
     return (
-        '<div style="font-family:sans-serif;color:#111;max-width:720px;">'
+        '<div style="font-family:sans-serif;color:#111;max-width:900px;">'
         f'<h2 style="margin-bottom:4px;">Storepulse {_DOT} {_format_header_date(ctx.today)}</h2>'
         f'<p style="color:#666;margin:4px 0;">Data through {_data_through_text(ctx)}</p>'
         f"{weekly_note_html}"
@@ -1187,7 +1243,9 @@ def build_digest(
         for platform, configured in (("ios", cfg.apple), ("android", cfg.google))
         if configured is not None and not _platform_has_data(conn, platform)
     )
-    all_rows = _build_app_rows(conn, as_of, window, table_end, platform_days)
+    all_rows = _build_app_rows(
+        conn, as_of, window, table_end, platform_days, _platform_first_days(conn)
+    )
     # Listed: not hidden (docs/SPEC.md, Storage: hidden apps leave every list but still
     # count in totals and warnings), and not on a platform without data (the Data line
     # says why). Pairs merge into one row; apps with nothing in either week collapse

@@ -168,9 +168,12 @@ and `uninstalls` is **User losses**, not device acquisitions.
 covering the 7 days ending on the most recent day with data, compared with the 7 days
 before, plus a lifetime installs total alongside it (everything ever collected, not just
 the 7-day window — the same figure also appears on the hosted dashboard's Overview and
-App pages). `storepulse init` walks you through SMTP setup — host, port, security,
-username, password, from and to addresses — and sends a test email before saving
-anything.
+App pages). Below that, a table gives each app's installs for the last 10 days, the last
+three calendar months and lifetime. A month that was only partly collected shows `—`
+(the first backfill loads 30 days of Apple data) until a longer backfill such as
+`storepulse backfill --source apple_sales --days 90` fills it in. `storepulse init` walks
+you through SMTP setup — host, port, security, username, password, from and to addresses
+— and sends a test email before saving anything.
 
 ```bash
 storepulse digest --dry-run                 # print the digest without sending it

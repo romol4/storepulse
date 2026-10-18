@@ -339,9 +339,11 @@ def _seed_pair(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def _row_totals(text: str, name: str) -> list[str]:
-    """A digest table row's last three cells: latest day, month and lifetime installs."""
+    """A digest table row's highlighted cells: latest day, this month and lifetime installs
+    (the row ends with the 10 days, the 3 months, then lifetime)."""
     (row,) = [line for line in text.splitlines() if line.startswith(f"  {name} ")]
-    return row.split()[-3:]
+    cells = row.split()
+    return [cells[-5], cells[-2], cells[-1]]
 
 
 def test_a_pair_is_one_digest_row_with_per_currency_money(conn: sqlite3.Connection) -> None:
@@ -374,12 +376,21 @@ def test_a_pair_shows_a_dash_for_a_day_one_member_has_not_loaded(
     db.log_ingest(conn, source="apple_sales", report_date=d, started_at=db.utc_now(), status="ok")
     discovery.pair_apps(conn)
     result = digest.build_digest(conn, CFG, today=date(2026, 9, 28))
-    # Sep 21-26: 3 iOS + 4 Android each day. Sep 27: Android not loaded yet.
-    # Month and lifetime add what each member has: 24 iOS (Sep 20-27) + 28 Android.
+    # Sep 18-19: nothing yet. Sep 20-26: 3 iOS + 4 Android each day. Sep 27: Android not
+    # loaded yet. Jul and Aug: iOS data starts Sep 20, so the pair has no total for them.
+    # This month and lifetime add what each member has: 24 iOS (Sep 20-27) + 28 Android.
     row = next(
         line for line in result.text.splitlines() if line.startswith("  libFT (iOS + Android) ")
     )
-    assert row.split()[-9:] == [*["7"] * 6, "*—*", "*52*", "*52*"]
+    assert row.split()[-14:] == [
+        *["0"] * 2,
+        *["7"] * 7,
+        "*—*",
+        "—",
+        "—",
+        "*52*",
+        "*52*",
+    ]
 
 
 def test_local_mode_never_merges(conn: sqlite3.Connection) -> None:
