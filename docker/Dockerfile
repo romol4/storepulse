@@ -3,7 +3,7 @@
 # Published as ghcr.io/romol4/storepulse by .github/workflows/release.yml.
 
 # python:3.14-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
-FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS build
+FROM python:3.15-slim@sha256:2da676046630d7bf14c6764ae1143dc7fa0377a53f94bf5a642f0b214aca5bce AS build
 WORKDIR /src
 RUN pip install --no-cache-dir "build>=1.2,<2"
 COPY pyproject.toml README.md LICENSE requirements-dev.lock ./
@@ -11,7 +11,7 @@ COPY src ./src
 RUN python -m build --wheel --outdir /dist
 
 # python:3.14-slim (Dependabot bumps this digest; a trailing comment on FROM isn't reliable)
-FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
+FROM python:3.15-slim@sha256:2da676046630d7bf14c6764ae1143dc7fa0377a53f94bf5a642f0b214aca5bce
 LABEL org.opencontainers.image.source="https://github.com/romol4/storepulse" \
       org.opencontainers.image.description="Storepulse hosted mode: App Store + Google Play stats, daily email and dashboard" \
       org.opencontainers.image.licenses="Apache-2.0"
